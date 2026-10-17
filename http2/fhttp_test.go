@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	tls "github.com/bogdanfinn/utls"
 	"github.com/igor-lemon/fhttp/cookiejar"
 	"github.com/igor-lemon/fhttp/httptest"
-	tls "github.com/bogdanfinn/utls"
 	"golang.org/x/net/publicsuffix"
 
 	http "github.com/igor-lemon/fhttp"
