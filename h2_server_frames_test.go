@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/fhttp/http2"
-	"github.com/bogdanfinn/fhttp/http2/hpack"
-	"github.com/bogdanfinn/fhttp/httptest"
+	. "github.com/igor-lemon/fhttp"
+	"github.com/igor-lemon/fhttp/http2"
+	"github.com/igor-lemon/fhttp/http2/hpack"
+	"github.com/igor-lemon/fhttp/httptest"
 )
 
 // h2Servers set up a Server with each HTTP/2 server implementation: the one
