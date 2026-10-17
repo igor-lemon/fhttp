@@ -19,3 +19,14 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   and ships none.
 - At the base `TestTransportRejectsConnHeaders` in `http2` fails, upstream as
   here.
+
+## Patches
+
+- **How each header field is written into HPACK** (`hpack.Representation`,
+  `Encoder.SetRepresentation`, `http2.Transport.HeaderRepresentation`): for a
+  field not found whole in a table, whether it goes into the dynamic table,
+  and whether a static name reference names the first entry with its name or
+  the last. Unset, every field is written as before. Chrome writes `:path`
+  without indexing, named by the first static `:path` (index 4); x/net's
+  encoder indexes it and names it by the last (5). Tests in
+  `http2/hpack/representation_test.go` and `http2/representation_test.go`.

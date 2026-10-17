@@ -127,6 +127,20 @@ func (t *headerFieldTable) idToIndex(id uint64) uint64 {
 
 // http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-07#appendix-B
 var staticTable = newStaticTable()
+
+// staticFirstName is the index of the first static entry with each name.
+var staticFirstName = firstNames(staticTableEntries[:])
+
+func firstNames(entries []HeaderField) map[string]uint64 {
+	first := map[string]uint64{}
+	for i, e := range entries {
+		if _, ok := first[e.Name]; !ok {
+			first[e.Name] = uint64(i + 1)
+		}
+	}
+	return first
+}
+
 var staticTableEntries = [...]HeaderField{
 	{Name: ":authority"},
 	{Name: ":method", Value: "GET"},
