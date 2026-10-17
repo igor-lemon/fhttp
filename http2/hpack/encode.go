@@ -28,6 +28,28 @@ type Encoder struct {
 	tableSizeUpdate bool
 	w               io.Writer
 	buf             []byte
+	// representation says how a field not found whole in a table is
+	// written; nil is the default.
+	representation func(HeaderField) Representation
+}
+
+// Representation is how a header field not found whole in a table is
+// written (RFC 7541, section 6.2). The zero value is the default: added to
+// the dynamic table when it fits, and named, when only its name is in the
+// static table, by the last entry with that name.
+type Representation struct {
+	// WithoutIndexing writes it as a literal without indexing (section
+	// 6.2.2), which leaves the dynamic table as it was.
+	WithoutIndexing bool
+	// FirstStaticName names it by the first static entry with its name
+	// rather than the last, as Chrome's encoder does.
+	FirstStaticName bool
+}
+
+// SetRepresentation sets how each field not found whole in a table is
+// written; nil is the default for every field.
+func (e *Encoder) SetRepresentation(of func(HeaderField) Representation) {
+	e.representation = of
 }
 
 // NewEncoder returns a new Encoder which performs HPACK encoding. An
@@ -63,7 +85,14 @@ func (e *Encoder) WriteField(f HeaderField) error {
 	if nameValueMatch {
 		e.buf = appendIndexed(e.buf, idx)
 	} else {
-		indexing := e.shouldIndex(f)
+		var r Representation
+		if e.representation != nil {
+			r = e.representation(f)
+		}
+		if r.FirstStaticName && idx <= uint64(staticTable.len()) {
+			idx = staticFirstName[f.Name]
+		}
+		indexing := e.shouldIndex(f) && !r.WithoutIndexing
 		if indexing {
 			e.dynTab.add(f)
 		}
