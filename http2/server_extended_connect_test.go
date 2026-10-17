@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	http "github.com/bogdanfinn/fhttp"
+	http "github.com/igor-lemon/fhttp"
 )
 
 // Extended CONNECT is off unless GODEBUG=http2xconnect=1 at startup
