@@ -15,7 +15,7 @@ import (
 
 	tls "github.com/bogdanfinn/utls"
 
-	"github.com/bogdanfinn/fhttp/internal/nettrace"
+	"github.com/igor-lemon/fhttp/internal/nettrace"
 )
 
 // unique type to prevent assignment.

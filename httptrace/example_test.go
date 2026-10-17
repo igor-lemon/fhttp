@@ -9,7 +9,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/bogdanfinn/fhttp/httptrace"
+	"github.com/igor-lemon/fhttp/httptrace"
 )
 
 func Example() {

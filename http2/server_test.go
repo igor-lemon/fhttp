@@ -29,8 +29,8 @@ import (
 
 	tls "github.com/bogdanfinn/utls"
 
-	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/fhttp/httptest"
+	http "github.com/igor-lemon/fhttp"
+	"github.com/igor-lemon/fhttp/httptest"
 
 	"golang.org/x/net/http2/hpack"
 )

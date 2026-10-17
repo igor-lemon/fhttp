@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bogdanfinn/fhttp/httptrace"
+	"github.com/igor-lemon/fhttp/httptrace"
 )
 
 // A Header represents the Key-value pairs in an HTTP header.

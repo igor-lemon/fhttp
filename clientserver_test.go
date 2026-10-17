@@ -29,9 +29,9 @@ import (
 
 	tls "github.com/bogdanfinn/utls"
 
-	. "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/fhttp/httptest"
-	"github.com/bogdanfinn/fhttp/httputil"
+	. "github.com/igor-lemon/fhttp"
+	"github.com/igor-lemon/fhttp/httptest"
+	"github.com/igor-lemon/fhttp/httputil"
 )
 
 type clientServerTest struct {
@@ -1502,9 +1502,9 @@ func testWriteHeaderAfterWrite(t *testing.T, h2, hijack bool) {
 		return
 	}
 	gotLog := strings.TrimSpace(errorLog.String())
-	wantLog := "http: superfluous response.WriteHeader call from github.com/bogdanfinn/fhttp_test.testWriteHeaderAfterWrite.func1 (clientserver_test.go:"
+	wantLog := "http: superfluous response.WriteHeader call from github.com/igor-lemon/fhttp_test.testWriteHeaderAfterWrite.func1 (clientserver_test.go:"
 	if hijack {
-		wantLog = "http: response.WriteHeader on hijacked connection from github.com/bogdanfinn/fhttp_test.testWriteHeaderAfterWrite.func1 (clientserver_test.go:"
+		wantLog = "http: response.WriteHeader on hijacked connection from github.com/igor-lemon/fhttp_test.testWriteHeaderAfterWrite.func1 (clientserver_test.go:"
 	}
 	if !strings.HasPrefix(gotLog, wantLog) {
 		t.Errorf("stderr output = %q; want %q", gotLog, wantLog)

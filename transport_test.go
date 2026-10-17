@@ -39,12 +39,12 @@ import (
 
 	tls "github.com/bogdanfinn/utls"
 
-	. "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/fhttp/httptest"
-	"github.com/bogdanfinn/fhttp/httptrace"
-	"github.com/bogdanfinn/fhttp/httputil"
-	"github.com/bogdanfinn/fhttp/internal"
-	"github.com/bogdanfinn/fhttp/internal/nettrace"
+	. "github.com/igor-lemon/fhttp"
+	"github.com/igor-lemon/fhttp/httptest"
+	"github.com/igor-lemon/fhttp/httptrace"
+	"github.com/igor-lemon/fhttp/httputil"
+	"github.com/igor-lemon/fhttp/internal"
+	"github.com/igor-lemon/fhttp/internal/nettrace"
 
 	"golang.org/x/net/http/httpguts"
 )
