@@ -94,6 +94,11 @@ type Transport struct {
 	HeaderPriority  *PriorityParam
 	HeaderTableSize uint32 // if nil, will use global initialHeaderTableSize
 
+	// HeaderRepresentation says how each header field not found whole in an
+	// HPACK table is written (hpack.Representation); nil is HPACK's default
+	// for every field.
+	HeaderRepresentation func(hpack.HeaderField) hpack.Representation
+
 	// IdleConnTimeout is the maximum amount of time an idle (keep-alive)
 	// connection will remain idle before closing itself. Zero means no limit.
 	IdleConnTimeout time.Duration
@@ -831,7 +836,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 
 	cc.fr.MaxHeaderListSize = t.maxHeaderListSize()
 
-	cc.henc = hpack.NewEncoder(&cc.hbuf)
+	cc.henc = t.newEncoder(&cc.hbuf)
 	// The encoder starts at the HPACK protocol-default dynamic table size
 	// (4096). We only ever shrink it in response to a peer SETTINGS frame
 	// advertising a smaller SETTINGS_HEADER_TABLE_SIZE (see processSettings);
@@ -1707,6 +1712,13 @@ func isNormalConnect(req *http.Request) bool {
 }
 
 // requires cc.mu be held.
+// newEncoder is an HPACK encoder writing to w, each field the way t says.
+func (t *Transport) newEncoder(w io.Writer) *hpack.Encoder {
+	enc := hpack.NewEncoder(w)
+	enc.SetRepresentation(t.HeaderRepresentation)
+	return enc
+}
+
 func (cc *ClientConn) encodeHeaders(req *http.Request, addGzipHeader bool, trailers string, contentLength int64) ([]byte, error) {
 	cc.hbuf.Reset()
 
