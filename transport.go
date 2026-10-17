@@ -2528,6 +2528,14 @@ var (
 
 func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err error) {
 	testHookEnterRoundTrip()
+	if req.HeaderFor != nil {
+		// What goes out is the request with the header HeaderFor gives,
+		// and what the rest of the round trip reads; roundTrip answers with
+		// the request it was given.
+		written := *req.Request
+		written.Header, written.HeaderFor = req.WrittenHeader(ProtocolHTTP1), nil
+		req.Request = &written
+	}
 	if !pc.t.replaceReqCanceler(req.cancelKey, pc.cancelRequest) {
 		pc.t.putOrCloseIdleConn(pc)
 		return nil, errRequestCanceled

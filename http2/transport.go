@@ -1206,7 +1206,16 @@ func (cc *ClientConn) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAfterReqBodyWrite bool, err error) {
-	if err := checkConnHeaders(req); err != nil {
+	// sent is the request with the header HeaderFor gives, which is what
+	// is checked, written and read while the request goes; the response
+	// names req.
+	sent := req
+	if req.HeaderFor != nil {
+		written := *req
+		written.Header = req.WrittenHeader(http.ProtocolHTTP2)
+		sent = &written
+	}
+	if err := checkConnHeaders(sent); err != nil {
 		return nil, false, err
 	}
 
@@ -1230,12 +1239,12 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	body := req.Body
 	contentLen := actualContentLength(req)
 	hasBody := contentLen != 0
-	requestedGzip := cc.requestGzip(req)
+	requestedGzip := cc.requestGzip(sent)
 
 	// we send: HEADERS{1}, CONTINUATION{0,} + DATA{0,} (DATA is
 	// sent by writeRequestBody below, along with any Trailers,
 	// again in form HEADERS{1}, CONTINUATION{0,})
-	hdrs, err := cc.encodeHeaders(req, requestedGzip, trailers, contentLen)
+	hdrs, err := cc.encodeHeaders(sent, requestedGzip, trailers, contentLen)
 	if err != nil {
 		cc.mu.Unlock()
 
@@ -1243,7 +1252,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	}
 
 	cs := cc.newStream()
-	cs.req = req
+	cs.req = sent
 	cs.trace = httptrace.ContextClientTrace(req.Context())
 	cs.requestedGzip = requestedGzip
 	bodyWriter := cc.t.getBodyWriterState(cs, body)

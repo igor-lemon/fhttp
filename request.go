@@ -166,6 +166,16 @@ type Request struct {
 	// for the Request.Write method.
 	Header Header
 
+	// HeaderFor, when set, gives the header the request is written with
+	// once the transport knows the protocol its connection speaks, in place
+	// of Header: protocol is ProtocolHTTP1 or ProtocolHTTP2, header is
+	// Header as the client left it, its jar's cookies in it, and nil is
+	// Header itself. What the transport decides about the request from
+	// then on, it decides on the header written, to which it adds what it
+	// would add to Header. Write and WriteProxy write the ProtocolHTTP1
+	// one. A redirect's request has none: the client makes it anew.
+	HeaderFor func(protocol string, header Header) Header
+
 	// Body is the request's body.
 	//
 	// For client requests, a nil body means the request has no
@@ -621,16 +631,17 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	if r.Header == nil {
 		r.Header = make(Header)
 	}
+	header := r.WrittenHeader(ProtocolHTTP1)
 
-	if _, ok := r.Header["Host"]; !ok {
-		if _, ok := r.Header["host"]; !ok {
-			r.Header.Set("Host", host)
+	if _, ok := header["Host"]; !ok {
+		if _, ok := header["host"]; !ok {
+			header.Set("Host", host)
 		}
 	}
 
 	// if user agent field is not present, add it
-	if uaCap, uaLow := r.Header["User-Agent"], r.Header["user-agent"]; uaCap == nil && uaLow == nil {
-		r.Header.Set("User-Agent", "Go-http-client/1.1")
+	if uaCap, uaLow := header["User-Agent"], header["user-agent"]; uaCap == nil && uaLow == nil {
+		header.Set("User-Agent", "Go-http-client/1.1")
 	}
 
 	// Process Body,ContentLength,Close,Trailer
@@ -638,12 +649,13 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	if err != nil {
 		return err
 	}
-	err = tw.addHeaders(&r.Header, trace)
+	tw.Header = header
+	err = tw.addHeaders(&header, trace)
 	if err != nil {
 		return err
 	}
 
-	err = r.Header.write(w, trace)
+	err = header.write(w, trace)
 	if err != nil {
 		return err
 	}

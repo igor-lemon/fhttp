@@ -17,8 +17,13 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
 
 - `LICENSE` is Go's: fhttp is a fork of the Go standard library's net/http,
   and ships none.
-- At the base `TestTransportRejectsConnHeaders` in `http2` fails, upstream as
-  here.
+- At the base, upstream as here, 32 tests of the package itself fail
+  (`TestRequestWrite`, `TestTransportGzip`, the `TestH12_*` tests and
+  others), 3 of `httputil` and 2 of `http2` (`TestTransportRejectsConnHeaders`
+  and `TestServer_MaxQueuedControlFrames`), and `TestOmitHTTP2` runs past ten
+  minutes; the patches change none of that. Run the package with
+  `-skip '^TestOmitHTTP2$'` and nothing else at once: its tests use up the
+  machine's ephemeral ports, and a run straight after another fails more.
 
 ## Patches
 
@@ -36,3 +41,14 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   request 220 on one connection, which a priority per transport made
   tls-forge send on connections of their own. Tests in
   `http2/priority_test.go`.
+- **The header a request is written with, per protocol**
+  (`Request.HeaderFor`, `Request.WrittenHeader`, `ProtocolHTTP1`,
+  `ProtocolHTTP2`): once the transport knows the protocol a request goes
+  over, it asks the request for the header to write, given the Header as the
+  client left it; nil is the Header. The HTTP/1.1 round trip and `Write`,
+  and the HTTP/2 round trip, check, write and decide on what it gives, and
+  answer with the request they were given. A redirect's request, made anew,
+  has none. Chrome writes one request differently over HTTP/1.1 and HTTP/2,
+  and ALPN, encrypted in TLS 1.3, says which only after the handshake;
+  tls-forge had changed the header in place from the trace's GotConn. Tests
+  in `headerfor_test.go` and `http2/headerfor_test.go`.
