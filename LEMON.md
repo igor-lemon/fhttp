@@ -12,6 +12,9 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
       grep -rl github.com/bogdanfinn/fhttp --include='*.go' --include=go.mod . |
         xargs perl -pi -e 's#github\.com/bogdanfinn/fhttp#github.com/igor-lemon/fhttp#g'
 
+  then `git diff --name-only -- '*.go' | xargs gofmt -w`, which puts the
+  renamed imports back in order.
+
 - `LICENSE` is Go's: fhttp is a fork of the Go standard library's net/http,
   and ships none.
 - At the base `TestTransportRejectsConnHeaders` in `http2` fails, upstream as
