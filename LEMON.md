@@ -30,3 +30,9 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   without indexing, named by the first static `:path` (index 4); x/net's
   encoder indexes it and names it by the last (5). Tests in
   `http2/hpack/representation_test.go` and `http2/representation_test.go`.
+- **A HEADERS priority per request** (`http2.WithHeaderPriority`): a request
+  whose context carries one sends it on its HEADERS frame, in place of the
+  Transport's HeaderPriority. Chrome gives a page weight 256 and a script's
+  request 220 on one connection, which a priority per transport made
+  tls-forge send on connections of their own. Tests in
+  `http2/priority_test.go`.
