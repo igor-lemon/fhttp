@@ -78,6 +78,13 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   the host's later requests go out there (Chromium's HttpNetworkTransaction
   and SpdySessionPool::CreateSession; measured by tls-forge). Tests in
   `http2/coalesce_test.go`.
+- **The cookies of an answer kept as a request says**
+  (`WithResponseCookies`): a Client asks the function a request's context
+  carries, of each answer to it, whether its Jar is given the cookies the
+  answer sets, and gives none when it says no; without one, every answer's,
+  as before. Chrome's network stack never hands over a 421 (Misdirected
+  Request) it sends the request again for, and keeps nothing it sets
+  (measured by tls-forge). Tests in `responsecookies_test.go`.
 - **The header a request is written with, per protocol**
   (`Request.HeaderFor`, `Request.WrittenHeader`, `ProtocolHTTP1`,
   `ProtocolHTTP2`): once the transport knows the protocol a request goes
