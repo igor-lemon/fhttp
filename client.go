@@ -176,7 +176,7 @@ func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTime
 	if err != nil {
 		return nil, didTimeout, err
 	}
-	if c.Jar != nil {
+	if c.Jar != nil && keepsCookies(req, resp) {
 		if rc := resp.Cookies(); len(rc) > 0 {
 			c.Jar.SetCookies(req.URL, rc)
 		}
