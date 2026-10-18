@@ -99,6 +99,13 @@ type Transport struct {
 	// for every field.
 	HeaderRepresentation func(hpack.HeaderField) hpack.Representation
 
+	// MaxEncoderHeaderTableSize optionally specifies an upper limit for the
+	// header compression table used for encoding request headers. Received
+	// SETTINGS_HEADER_TABLE_SIZE settings are capped at this limit. If zero,
+	// the default value of 4096 is used. Chrome takes whatever the peer
+	// allows.
+	MaxEncoderHeaderTableSize uint32
+
 	// IdleConnTimeout is the maximum amount of time an idle (keep-alive)
 	// connection will remain idle before closing itself. Zero means no limit.
 	IdleConnTimeout time.Duration
@@ -838,12 +845,13 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 
 	cc.henc = t.newEncoder(&cc.hbuf)
 	// The encoder starts at the HPACK protocol-default dynamic table size
-	// (4096). We only ever shrink it in response to a peer SETTINGS frame
-	// advertising a smaller SETTINGS_HEADER_TABLE_SIZE (see processSettings);
-	// we never grow above 4096, matching browser encoders. Tracking the
-	// currently-applied size lets us avoid emitting a spurious Dynamic Table
-	// Size Update when the peer allows >= 4096 (the common case).
-	cc.hencMaxTableSize = initialHeaderTableSize
+	// (4096), or at MaxEncoderHeaderTableSize when that is smaller, and
+	// follows a peer SETTINGS frame's SETTINGS_HEADER_TABLE_SIZE up to
+	// MaxEncoderHeaderTableSize (see processSettings): unset, it never grows
+	// above 4096. Tracking the currently-applied size lets us avoid emitting a
+	// spurious Dynamic Table Size Update when the peer allows what the encoder
+	// already has (the common case).
+	cc.hencMaxTableSize = min(initialHeaderTableSize, t.maxEncoderHeaderTableSize())
 
 	if t.AllowHTTP {
 		cc.nextStreamID = 3
@@ -1710,14 +1718,24 @@ func isNormalConnect(req *http.Request) bool {
 	return req.Method == "CONNECT" && req.Header.Get(":protocol") == ""
 }
 
-// requires cc.mu be held.
-// newEncoder is an HPACK encoder writing to w, each field the way t says.
+// newEncoder is an HPACK encoder writing to w, each field the way t says,
+// into a table as large as t lets the peer make it.
 func (t *Transport) newEncoder(w io.Writer) *hpack.Encoder {
 	enc := hpack.NewEncoder(w)
 	enc.SetRepresentation(t.HeaderRepresentation)
+	enc.SetMaxDynamicTableSizeLimit(t.maxEncoderHeaderTableSize())
 	return enc
 }
 
+// maxEncoderHeaderTableSize is MaxEncoderHeaderTableSize, or 4096 when unset.
+func (t *Transport) maxEncoderHeaderTableSize() uint32 {
+	if t.MaxEncoderHeaderTableSize != 0 {
+		return t.MaxEncoderHeaderTableSize
+	}
+	return initialHeaderTableSize
+}
+
+// requires cc.mu be held.
 func (cc *ClientConn) encodeHeaders(req *http.Request, addGzipHeader bool, trailers string, contentLength int64) ([]byte, error) {
 	cc.hbuf.Reset()
 
@@ -2754,20 +2772,15 @@ func (rl *clientConnReadLoop) processSettings(f *SettingsFrame) error {
 			// for our request-header encoder (RFC 7541 §4.2 / §6.3). henc is
 			// guarded by cc.mu, which is held here.
 			//
-			// We cap the effective size at the protocol default (4096) — real
-			// browser encoders do not use larger dynamic tables — and only
-			// touch the encoder when the effective size actually changes.
-			// Consequently the common case, where the peer allows >= 4096, is
-			// a no-op and emits NO Dynamic Table Size Update, keeping our HPACK
-			// byte stream identical to a browser that stays at the default.
-			// The change bites only when a peer advertises a table size < 4096
-			// (e.g. 0): previously the encoder kept indexing up to 4096 in
-			// violation of the peer's limit; now it correctly shrinks and
-			// signals the update.
-			effectiveTableSize := s.Val
-			if effectiveTableSize > initialHeaderTableSize {
-				effectiveTableSize = initialHeaderTableSize
-			}
+			// We cap the effective size at MaxEncoderHeaderTableSize (4096
+			// unless set; Chrome takes all the peer allows) and only touch
+			// the encoder when the effective size actually changes.
+			// Consequently a peer that allows what the encoder already has is
+			// a no-op and emits NO Dynamic Table Size Update, as Chrome emits
+			// none. A peer that advertises a table size below it (e.g. 0) is
+			// told of the smaller table; previously the encoder kept indexing
+			// up to 4096 in violation of the peer's limit.
+			effectiveTableSize := min(s.Val, cc.t.maxEncoderHeaderTableSize())
 			if effectiveTableSize != cc.hencMaxTableSize {
 				cc.henc.SetMaxDynamicTableSize(effectiveTableSize)
 				cc.hencMaxTableSize = effectiveTableSize
