@@ -85,6 +85,25 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   as before. Chrome's network stack never hands over a 421 (Misdirected
   Request) it sends the request again for, and keeps nothing it sets
   (measured by tls-forge). Tests in `responsecookies_test.go`.
+- **WINDOW_UPDATE as Chrome sends them** (`http2.Transport.WindowUpdateDelay`):
+  when set, the transport tells the peer of the window its reader frees as
+  Chrome's network stack does (SpdySession and
+  SpdyStream::IncreaseRecvWindowSize; measured on Chrome 155 by tls-forge):
+  what is freed and untold of a window, once it is more than half of that
+  window, the connection's (the RFC's 65535 and ConnectionFlow) or a stream's
+  (the SETTINGS_INITIAL_WINDOW_SIZE it advertised, whatever the peer's own),
+  or at the first byte freed more than the delay after the peer was last
+  told, or after the connection or stream began, however little; the
+  connection's first; nothing more for a stream the peer ended or that was
+  reset. Padding, data for a stream that is gone and what a body let go of
+  held unread are freed at once and told of by the same rule. A body let go
+  of and a frame put into it are one under the connection's lock, so that a
+  frame is unread in the body or comes after the reset, and is never lost to
+  the window, as the transport's own rule loses one between them. Chrome
+  waits five seconds. Unset, the transport's own rule, as before: a stream
+  told of every 16 KiB read while the peer's own window is under 1 MiB, and
+  the connection given back up to ConnectionFlow once less than half of that
+  is left. Tests in `http2/windowupdate_test.go`.
 - **The header a request is written with, per protocol**
   (`Request.HeaderFor`, `Request.WrittenHeader`, `ProtocolHTTP1`,
   `ProtocolHTTP2`): once the transport knows the protocol a request goes
