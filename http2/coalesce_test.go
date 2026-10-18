@@ -419,3 +419,152 @@ func TestOnlyCachedConnDialsWhenAShareGoesAway(t *testing.T) {
 		t.Errorf("asked for %q", asked)
 	}
 }
+
+// alone sends a GET of url with tr, as opt says, made with a context that
+// says whether it may go out on a connection shared with its host, and is
+// what it was answered: the address it came from.
+func alone(t *testing.T, tr *Transport, url string, allowed bool, opt RoundTripOpt) (string, error) {
+	t.Helper()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return send(tr, req.WithContext(WithCoalescing(req.Context(), allowed)), opt)
+}
+
+// pooledFrom is the pool's ClientConn whose connection is from addr.
+func pooledFrom(t *testing.T, tr *Transport, addr string) *ClientConn {
+	t.Helper()
+	p := tr.connPool().(*clientConnPool)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, cc := range p.made {
+		if cc.tconn.LocalAddr().String() == addr {
+			return cc
+		}
+	}
+	t.Fatalf("no connection of the pool's is from %s", addr)
+	return nil
+}
+
+// keysOf are the host:ports the pool keeps the connection from addr under,
+// the one it was dialed for first.
+func keysOf(t *testing.T, tr *Transport, addr string) []string {
+	t.Helper()
+	cc := pooledFrom(t, tr, addr)
+	p := tr.connPool().(*clientConnPool)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.keys[cc])
+}
+
+// heldFor are the addresses of the connections the pool holds for key.
+func heldFor(tr *Transport, key string) []string {
+	p := tr.connPool().(*clientConnPool)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, cc := range p.conns[key] {
+		out = append(out, cc.tconn.LocalAddr().String())
+	}
+	return out
+}
+
+func TestARequestThatMayNotCoalesceGoesOutOnAConnectionDialedForItsHost(t *testing.T) {
+	st := newServerTester(t, answerFrom, optOnlyServer)
+	defer st.Close()
+	c := &coalescer{answer: func(_ string, conns []net.Conn) net.Conn { return conns[0] }}
+	tr, dials := coalescing(t, st.ts.Listener.Addr().String(), c)
+
+	first, shared := from(t, tr, "https://a.test/"), from(t, tr, "https://b.test/")
+	own, err := alone(t, tr, "https://b.test/", false, RoundTripOpt{})
+	if err != nil {
+		t.Fatalf("GET b.test alone: %v", err)
+	}
+	// The connection dialed for b.test carries its requests from then on,
+	// and a.test's carries a.test's alone.
+	later, again := from(t, tr, "https://b.test/x"), from(t, tr, "https://a.test/x")
+	if shared != first || own == first || later != own || again != first || dials.Load() != 2 {
+		t.Errorf("a.test from %s and %s, b.test from %s, %s alone, then %s; %d dials", first, again, shared, own,
+			later, dials.Load())
+	}
+	if asked := c.asked(); !slices.Equal(asked, []string{"b.test:443"}) {
+		t.Errorf("asked for %q", asked)
+	}
+	if keys, held := keysOf(t, tr, first), heldFor(tr, "b.test:443"); !slices.Equal(keys, []string{"a.test:443"}) ||
+		!slices.Equal(held, []string{own}) {
+		t.Errorf("a.test's connection kept for %q, b.test's held %q", keys, held)
+	}
+	// One of its host's own it takes as any request does.
+	if got, err := alone(t, tr, "https://a.test/y", false, RoundTripOpt{}); err != nil || got != first || dials.Load() != 2 {
+		t.Errorf("a.test alone from %s, %v; %d dials", got, err, dials.Load())
+	}
+}
+
+func TestARequestThatMayNotCoalesceTakesNoSharedConnectionCached(t *testing.T) {
+	st := newServerTester(t, answerFrom, optOnlyServer)
+	defer st.Close()
+	c := &coalescer{answer: func(_ string, conns []net.Conn) net.Conn { return conns[0] }}
+	tr, dials := coalescing(t, st.ts.Listener.Addr().String(), c)
+	first := from(t, tr, "https://a.test/")
+	only := RoundTripOpt{OnlyCachedConn: true}
+	// Shared, it is not taken; not shared yet, it is not asked for.
+	for range 2 {
+		if got, err := alone(t, tr, "https://b.test/", false, only); !errors.Is(err, ErrNoCachedConn) {
+			t.Errorf("b.test alone, only cached: %q, %v", got, err)
+		}
+		from(t, tr, "https://b.test/")
+	}
+	if held, err := alone(t, tr, "https://a.test/", false, only); err != nil || held != first {
+		t.Errorf("a.test alone, only cached: %q, %v; a.test from %s", held, err, first)
+	}
+	if asked := c.asked(); !slices.Equal(asked, []string{"b.test:443"}) || dials.Load() != 1 {
+		t.Errorf("asked for %q, %d dials", asked, dials.Load())
+	}
+}
+
+func TestARequestThatMayCoalesceIsSharedAConnection(t *testing.T) {
+	st := newServerTester(t, answerFrom, optOnlyServer)
+	defer st.Close()
+	c := &coalescer{answer: func(_ string, conns []net.Conn) net.Conn { return conns[0] }}
+	tr, dials := coalescing(t, st.ts.Listener.Addr().String(), c)
+	first := from(t, tr, "https://a.test/")
+	if got, err := alone(t, tr, "https://b.test/", true, RoundTripOpt{}); err != nil || got != first || dials.Load() != 1 {
+		t.Errorf("b.test from %s, %v; a.test from %s; %d dials", got, err, first, dials.Load())
+	}
+}
+
+func TestAConnectionDialedForAHostTakesItsRequestsFromThoseSharedWithIt(t *testing.T) {
+	st := newServerTester(t, answerFrom, optOnlyServer)
+	defer st.Close()
+	c := &coalescer{answer: func(_ string, conns []net.Conn) net.Conn { return conns[0] }}
+	tr, _ := coalescing(t, st.ts.Listener.Addr().String(), c)
+	closing := func(addr string, closing bool) {
+		cc := pooledFrom(t, tr, addr)
+		cc.mu.Lock()
+		cc.closing = closing
+		cc.mu.Unlock()
+	}
+	// c.test dials its own while a.test's can take no more; b.test is shared
+	// a.test's, then c.test's when a.test's can take no more, and dials its
+	// own when neither can.
+	a := from(t, tr, "https://a.test/")
+	closing(a, true)
+	other := from(t, tr, "https://c.test/")
+	closing(a, false)
+	closing(other, true)
+	sharedA := from(t, tr, "https://b.test/")
+	closing(a, true)
+	closing(other, false)
+	sharedOther := from(t, tr, "https://b.test/x")
+	closing(other, true)
+	own := from(t, tr, "https://b.test/y")
+	if sharedA != a || sharedOther != other || own == a || own == other {
+		t.Errorf("a.test from %s, c.test from %s, b.test from %s, %s and %s", a, other, sharedA, sharedOther, own)
+	}
+	keysA, keysOther, held := keysOf(t, tr, a), keysOf(t, tr, other), heldFor(tr, "b.test:443")
+	if !slices.Equal(keysA, []string{"a.test:443"}) || !slices.Equal(keysOther, []string{"c.test:443"}) ||
+		!slices.Equal(held, []string{own}) {
+		t.Errorf("a.test's connection kept for %q, c.test's for %q, b.test's held %q", keysA, keysOther, held)
+	}
+}
