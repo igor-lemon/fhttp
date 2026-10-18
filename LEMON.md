@@ -68,6 +68,16 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   sends a request to another name over an HTTP/2 connection it holds at an
   address the name has, under a certificate good for it. Tests in
   `http2/coalesce_test.go`.
+- **A request that shares no connection** (`http2.WithCoalescing`): a
+  request whose context says it may not goes out only on a connection dialed
+  for its own host:port, one dialed for it when the default pool holds none
+  that can take it, and Coalesce is not asked; and a connection dialed for a
+  host:port carries its requests from then on, in place of those shared with
+  it. Chrome sends a request a server answered 421 (Misdirected Request)
+  again with IP-based pooling off, so on a connection of its host's own, and
+  the host's later requests go out there (Chromium's HttpNetworkTransaction
+  and SpdySessionPool::CreateSession; measured by tls-forge). Tests in
+  `http2/coalesce_test.go`.
 - **The header a request is written with, per protocol**
   (`Request.HeaderFor`, `Request.WrittenHeader`, `ProtocolHTTP1`,
   `ProtocolHTTP2`): once the transport knows the protocol a request goes

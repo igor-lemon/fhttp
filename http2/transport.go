@@ -76,10 +76,12 @@ type Transport struct {
 	// for it. It is given the pool's connections that can take a new
 	// request, in the order they were made, and is the one the request goes
 	// out on, or nil. The connection it names carries the requests to addr
-	// that follow too, for as long as it can take them. A request that asks
-	// for its connection to be closed is never shared one. Chrome sends a
-	// request to another name over an HTTP/2 connection it holds, at an
-	// address the name resolves to, with a certificate good for the name.
+	// that follow too, for as long as it can take them, or until one is
+	// dialed for addr. A request that asks for its connection to be closed is
+	// never shared one, nor is one whose context says it may not
+	// (WithCoalescing). Chrome sends a request to another name over an HTTP/2
+	// connection it holds, at an address the name resolves to, with a
+	// certificate good for the name.
 	Coalesce func(req *http.Request, addr string, conns []net.Conn) net.Conn
 
 	connPoolOnce  sync.Once
