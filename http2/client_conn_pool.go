@@ -8,6 +8,7 @@ package http2
 
 import (
 	"net"
+	"slices"
 	"sync"
 
 	tls "github.com/bogdanfinn/utls"
@@ -39,7 +40,9 @@ type clientConnPool struct {
 
 	mu sync.Mutex // TODO: maybe switch to RWMutex
 	// A conn is shared with another host:port, one it was not dialed for,
-	// when Transport.Coalesce says so: it is then kept under both keys.
+	// when Transport.Coalesce says so: it is then kept under both keys. The
+	// first of a conn's keys is the host:port it was dialed for, and those
+	// after it the ones it is shared with.
 	conns        map[string][]*ClientConn // key is host:port
 	dialing      map[string]*dialCall     // currently in-flight dials
 	keys         map[*ClientConn][]string
@@ -91,7 +94,12 @@ func (p *clientConnPool) getClientConn(req *http.Request, addr string, dialOnMis
 		return cc, nil
 	}
 	p.mu.Lock()
+	shares := mayCoalesce(req)
 	for _, cc := range p.conns[addr] {
+		if !shares && p.keys[cc][0] != addr {
+			// Dialed for another host:port.
+			continue
+		}
 		if st := cc.idleState(); st.canTakeNewRequest {
 			if p.shouldTraceGetConn(st) {
 				traceGetConn(req, addr)
@@ -100,7 +108,7 @@ func (p *clientConnPool) getClientConn(req *http.Request, addr string, dialOnMis
 			return cc, nil
 		}
 	}
-	if p.t.Coalesce != nil && !isConnectionCloseRequest(req) {
+	if shares && p.t.Coalesce != nil && !isConnectionCloseRequest(req) {
 		if cc := p.coalesceLocked(req, addr); cc != nil {
 			traceGetConn(req, addr)
 			p.mu.Unlock()
@@ -258,10 +266,24 @@ func (p *clientConnPool) addConnLocked(key string, cc *ClientConn) {
 		p.keys = make(map[*ClientConn][]string)
 	}
 	if len(p.keys[cc]) == 0 {
+		// Dialed for key, it takes key's requests from those shared with it.
+		p.unshareLocked(key)
 		p.made = append(p.made, cc)
 	}
 	p.conns[key] = append(p.conns[key], cc)
 	p.keys[cc] = append(p.keys[cc], key)
+}
+
+// unshareLocked has the conns shared with key, dialed for another host:port,
+// carry its requests no more, as Chrome's pool drops the alias of a key for
+// the session it makes for the key. p.mu must be held.
+func (p *clientConnPool) unshareLocked(key string) {
+	for _, cc := range slices.Clone(p.conns[key]) {
+		if p.keys[cc][0] != key {
+			p.conns[key] = filterOutClientConn(p.conns[key], cc)
+			p.keys[cc] = slices.DeleteFunc(p.keys[cc], func(k string) bool { return k == key })
+		}
+	}
 }
 
 func (p *clientConnPool) MarkDead(cc *ClientConn) {
