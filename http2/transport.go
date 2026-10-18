@@ -121,6 +121,16 @@ type Transport struct {
 	// allows.
 	MaxEncoderHeaderTableSize uint32
 
+	// WindowUpdateDelay, when set, has the transport tell the peer of the
+	// window its reader frees as Chrome's network stack does (windowupdate.go):
+	// the connection's once more than half of its window is freed and untold,
+	// a stream's once more than half of the window it advertised is, and
+	// either at the first byte freed more than WindowUpdateDelay after it last
+	// told the peer, or after it began, however little; a stream the peer
+	// ended is told nothing more. Chrome waits five seconds. Zero keeps the
+	// transport's own rule.
+	WindowUpdateDelay time.Duration
+
 	// IdleConnTimeout is the maximum amount of time an idle (keep-alive)
 	// connection will remain idle before closing itself. Zero means no limit.
 	IdleConnTimeout time.Duration
@@ -387,6 +397,12 @@ type ClientConn struct {
 	wmu        sync.Mutex // held while writing; acquire AFTER mu if holding both
 	connFlow   uint32
 	streamFlow uint32
+
+	// Under WindowUpdateDelay: what was freed of the connection's window and
+	// the peer not told of, and when it was last told or the connection
+	// began. Guarded by mu.
+	freed  int32
+	toldAt time.Time
 }
 
 // clientStream is the state for a single HTTP/2 stream. One of these
@@ -426,6 +442,12 @@ type clientStream struct {
 	trace        *httptrace.ClientTrace // or nil
 
 	trailer http.Header // accumulated trailers
+
+	// Under WindowUpdateDelay: what was freed of the stream's window and the
+	// peer not told of, and when it was last told or the stream began.
+	// Guarded by cc.mu.
+	freed  int32
+	toldAt time.Time
 }
 
 // awaitRequestCancel waits for the user to cancel a request or for the done
@@ -854,6 +876,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 
 	cc.cond = sync.NewCond(&cc.mu)
 	cc.flow.add(int32(initialWindowSize))
+	cc.toldAt = timeNow()
 
 	// TODO: adjust this writer size to account for frame size +
 	// MTU + crypto/tls record padding.
@@ -2065,6 +2088,7 @@ func (cc *ClientConn) newStreamWithID(streamID uint32, incNext bool) *clientStre
 		resc:      make(chan resAndError, 1),
 		peerReset: make(chan struct{}),
 		done:      make(chan struct{}),
+		toldAt:    timeNow(),
 	}
 	cs.flow.add(int32(cc.initialWindowSize))
 	cs.flow.setConnFlow(&cc.flow)
@@ -2092,19 +2116,24 @@ func (cc *ClientConn) streamByID(id uint32, andRemove bool) *clientStream {
 	defer cc.mu.Unlock()
 	cs := cc.streams[id]
 	if andRemove && cs != nil && !cc.closed {
-		cc.lastActive = time.Now()
-		delete(cc.streams, id)
-		if len(cc.streams) == 0 && cc.idleTimer != nil {
-			cc.idleTimer.Reset(cc.idleTimeout)
-			cc.lastIdle = time.Now()
-		}
-		close(cs.done)
-		// Wake up checkResetOrDone via clientStream.awaitFlowControl and
-		// wake up RoundTrip if there is a pending request.
-		cc.cond.Broadcast()
+		cc.forgetStreamLocked(cs)
 	}
 
 	return cs
+}
+
+// forgetStreamLocked takes cs off the connection's streams. Requires cc.mu.
+func (cc *ClientConn) forgetStreamLocked(cs *clientStream) {
+	cc.lastActive = time.Now()
+	delete(cc.streams, cs.ID)
+	if len(cc.streams) == 0 && cc.idleTimer != nil {
+		cc.idleTimer.Reset(cc.idleTimeout)
+		cc.lastIdle = time.Now()
+	}
+	close(cs.done)
+	// Wake up checkResetOrDone via clientStream.awaitFlowControl and
+	// wake up RoundTrip if there is a pending request.
+	cc.cond.Broadcast()
 }
 
 // clientConnReadLoop is the state owned by the clientConn's frame-reading readLoop.
@@ -2514,14 +2543,18 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 
 	var connAdd, streamAdd int32
 
-	// Check the conn-level first, before the stream-level.
-	// Use dynamic connFlow logic
-	if v := cc.inflow.available(); v < int32(cc.connFlow/2) {
+	if cc.t.WindowUpdateDelay > 0 {
+		now := timeNow()
+		connAdd = cc.freedOfConn(int32(n), now)
+		streamAdd = cc.freedOfStream(cs, int32(n), now)
+	} else if v := cc.inflow.available(); v < int32(cc.connFlow/2) {
+		// Check the conn-level first, before the stream-level.
+		// Use dynamic connFlow logic
 		connAdd = int32(cc.connFlow) - v
 		cc.inflow.add(connAdd)
 	}
 
-	if err == nil {
+	if cc.t.WindowUpdateDelay == 0 && err == nil {
 		// Consider any buffered body data (read from the conn but not
 		// consumed by the client) when computing flow control for this
 		// stream.
@@ -2575,6 +2608,12 @@ func (b transportResponseBody) Close() error {
 	cs := b.cs
 	cc := cs.cc
 
+	if cc.t.WindowUpdateDelay > 0 {
+		cc.closeBody(cs)
+
+		return nil
+	}
+
 	serverSentStreamEnd := cs.bufPipe.Err() == io.EOF
 	unread := cs.bufPipe.Len()
 
@@ -2623,7 +2662,17 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) error {
 		// by the peer? Tough without accumulating too much state.
 
 		// But at least return their flow control:
-		if f.Length > 0 {
+		if f.Length > 0 && cc.t.WindowUpdateDelay > 0 {
+			// Freed at once, and told of by Chrome's rule (windowupdate.go).
+			cc.mu.Lock()
+			if connAdd := cc.freedOfConn(int32(f.Length), timeNow()); connAdd != 0 {
+				cc.wmu.Lock()
+				cc.fr.WriteWindowUpdate(0, uint32(connAdd))
+				cc.bw.Flush()
+				cc.wmu.Unlock()
+			}
+			cc.mu.Unlock()
+		} else if f.Length > 0 {
 			cc.mu.Lock()
 			cc.inflow.add(int32(f.Length))
 			cc.mu.Unlock()
@@ -2679,7 +2728,18 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) error {
 		if didReset {
 			refund += len(data)
 		}
-		if refund > 0 {
+		if refund > 0 && cc.t.WindowUpdateDelay > 0 {
+			// Freed at once, and told of by Chrome's rule (windowupdate.go):
+			// the stream's padding while it is open, as Chrome's
+			// SpdyStream::OnPaddingConsumed.
+			now := timeNow()
+			connAdd := cc.freedOfConn(int32(refund), now)
+			var streamAdd int32
+			if !didReset {
+				streamAdd = cc.freedOfStream(cs, int32(refund), now)
+			}
+			cc.writeWindowUpdates(cs, connAdd, streamAdd)
+		} else if refund > 0 {
 			cc.inflow.add(int32(refund))
 			cc.wmu.Lock()
 			cc.fr.WriteWindowUpdate(0, uint32(refund))
@@ -2690,14 +2750,23 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) error {
 			cc.bw.Flush()
 			cc.wmu.Unlock()
 		}
+		var err error
+		if cc.t.WindowUpdateDelay > 0 && len(data) > 0 && !didReset {
+			// Into the body under the lock, which a body let go of takes
+			// too: a frame is in it, unread, or comes after the stream's
+			// reset and is freed at once, never neither (closeBody).
+			_, err = cs.bufPipe.Write(data)
+			data = nil
+		}
 		cc.mu.Unlock()
 
 		if len(data) > 0 && !didReset {
-			if _, err := cs.bufPipe.Write(data); err != nil {
-				rl.endStreamError(cs, err)
+			_, err = cs.bufPipe.Write(data)
+		}
+		if err != nil {
+			rl.endStreamError(cs, err)
 
-				return err
-			}
+			return err
 		}
 	}
 
