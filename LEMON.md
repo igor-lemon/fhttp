@@ -35,6 +35,13 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   without indexing, named by the first static `:path` (index 4); x/net's
   encoder indexes it and names it by the last (5). Tests in
   `http2/hpack/representation_test.go` and `http2/representation_test.go`.
+- **A field too large for the HPACK table, indexed all the same**
+  (`hpack.Representation.IndexTooLarge`): a field larger than the dynamic
+  table is written with incremental indexing, which empties the table (RFC
+  7541, section 4.4), rather than without indexing, which leaves it as it
+  was. Chrome's encoder indexes every field its policy says to, whatever its
+  size: a cookie of 4 KiB empties the table, and the requests after it are
+  written whole. Tests in `http2/hpack/representation_test.go`.
 - **A HEADERS priority per request** (`http2.WithHeaderPriority`): a request
   whose context carries one sends it on its HEADERS frame, in place of the
   Transport's HeaderPriority. Chrome gives a page weight 256 and a script's

@@ -44,6 +44,11 @@ type Representation struct {
 	// FirstStaticName names it by the first static entry with its name
 	// rather than the last, as Chrome's encoder does.
 	FirstStaticName bool
+	// IndexTooLarge writes it with incremental indexing even when it is
+	// larger than the dynamic table, which then empties the table (section
+	// 4.4), as Chrome's encoder does. By default such a field is written
+	// without indexing, and the table is left as it was.
+	IndexTooLarge bool
 }
 
 // SetRepresentation sets how each field not found whole in a table is
@@ -92,7 +97,7 @@ func (e *Encoder) WriteField(f HeaderField) error {
 		if r.FirstStaticName && idx <= uint64(staticTable.len()) {
 			idx = staticFirstName[f.Name]
 		}
-		indexing := e.shouldIndex(f) && !r.WithoutIndexing
+		indexing := e.indexes(f, r)
 		if indexing {
 			e.dynTab.add(f)
 		}
@@ -163,6 +168,18 @@ func (e *Encoder) SetMaxDynamicTableSizeLimit(v uint32) {
 // shouldIndex reports whether f should be indexed.
 func (e *Encoder) shouldIndex(f HeaderField) bool {
 	return !f.Sensitive && f.Size() <= e.dynTab.maxSize
+}
+
+// indexes reports whether f, written as r says, goes into the dynamic table:
+// a field too large for it all the same when r says so, which empties it.
+func (e *Encoder) indexes(f HeaderField, r Representation) bool {
+	switch {
+	case r.WithoutIndexing:
+		return false
+	case r.IndexTooLarge:
+		return !f.Sensitive
+	}
+	return e.shouldIndex(f)
 }
 
 // appendIndexed appends index i, as encoded in "Indexed Header Field"
