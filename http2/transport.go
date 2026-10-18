@@ -69,6 +69,19 @@ type Transport struct {
 	// If nil, the default is used.
 	ConnPool ClientConnPool
 
+	// Coalesce, if non-nil, is asked by the default pool when a request is
+	// to go to addr, a host:port it holds no connection to that can take
+	// it, whether it may go out on a connection the pool holds to another
+	// (connection reuse, RFC 9113, section 9.1.1) rather than on one dialed
+	// for it. It is given the pool's connections that can take a new
+	// request, in the order they were made, and is the one the request goes
+	// out on, or nil. The connection it names carries the requests to addr
+	// that follow too, for as long as it can take them. A request that asks
+	// for its connection to be closed is never shared one. Chrome sends a
+	// request to another name over an HTTP/2 connection it holds, at an
+	// address the name resolves to, with a certificate good for the name.
+	Coalesce func(req *http.Request, addr string, conns []net.Conn) net.Conn
+
 	connPoolOnce  sync.Once
 	connPoolOrDef ClientConnPool // non-nil version of ConnPool
 
@@ -541,7 +554,11 @@ type RoundTripOpt struct {
 	// OnlyCachedConn controls whether RoundTripOpt may
 	// create a new TCP connection. If set true and
 	// no cached connection is available, RoundTripOpt
-	// will return ErrNoCachedConn.
+	// will return ErrNoCachedConn. With the default pool, a cached
+	// connection is one it holds to the request's host:port or one
+	// Transport.Coalesce shares; a request that has gone out on one
+	// and is tried again may dial. Other pools are asked as they are
+	// without it.
 	OnlyCachedConn bool
 }
 
@@ -587,7 +604,7 @@ func (t *Transport) RoundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 
 	addr := authorityAddr(req.URL.Scheme, req.URL.Host)
 	for retry := 0; ; retry++ {
-		cc, err := t.connPool().GetClientConn(req, addr)
+		cc, err := t.getClientConn(req, addr, opt.OnlyCachedConn && retry == 0)
 		if err != nil {
 			t.vlogf("http2: Transport failed to get client conn for %s: %v", addr, err)
 
@@ -620,6 +637,15 @@ func (t *Transport) RoundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 
 		return res, nil
 	}
+}
+
+// getClientConn is the connection req goes out on to addr: with the default
+// pool, only one it holds or shares when onlyCached.
+func (t *Transport) getClientConn(req *http.Request, addr string, onlyCached bool) (*ClientConn, error) {
+	if p, ok := t.connPool().(*clientConnPool); ok && onlyCached {
+		return p.getClientConn(req, addr, noDialOnMiss)
+	}
+	return t.connPool().GetClientConn(req, addr)
 }
 
 // CloseIdleConnections closes any connections which were previously

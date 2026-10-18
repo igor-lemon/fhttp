@@ -7,6 +7,7 @@
 package http2
 
 import (
+	"net"
 	"sync"
 
 	tls "github.com/bogdanfinn/utls"
@@ -37,12 +38,15 @@ type clientConnPool struct {
 	t *Transport
 
 	mu sync.Mutex // TODO: maybe switch to RWMutex
-	// TODO: add support for sharing conns based on cert names
-	// (e.g. share conn for googleapis.com and appspot.com)
+	// A conn is shared with another host:port, one it was not dialed for,
+	// when Transport.Coalesce says so: it is then kept under both keys.
 	conns        map[string][]*ClientConn // key is host:port
 	dialing      map[string]*dialCall     // currently in-flight dials
 	keys         map[*ClientConn][]string
 	addConnCalls map[string]*addConnCall // in-flight addConnIfNeede calls
+	// made are the conns in the order they were added, the order
+	// Transport.Coalesce is offered them in.
+	made []*ClientConn
 }
 
 func (p *clientConnPool) GetClientConn(req *http.Request, addr string) (*ClientConn, error) {
@@ -96,6 +100,13 @@ func (p *clientConnPool) getClientConn(req *http.Request, addr string, dialOnMis
 			return cc, nil
 		}
 	}
+	if p.t.Coalesce != nil && !isConnectionCloseRequest(req) {
+		if cc := p.coalesceLocked(req, addr); cc != nil {
+			traceGetConn(req, addr)
+			p.mu.Unlock()
+			return cc, nil
+		}
+	}
 	if !dialOnMiss {
 		p.mu.Unlock()
 		return nil, ErrNoCachedConn
@@ -105,6 +116,35 @@ func (p *clientConnPool) getClientConn(req *http.Request, addr string, dialOnMis
 	p.mu.Unlock()
 	<-call.done
 	return call.res, call.err
+}
+
+// coalesceLocked is a conn of the pool's to another host:port that
+// Transport.Coalesce says req to addr may go out on, from then on one of
+// addr's too; or nil. p.mu is held, and let go while Coalesce is asked, which
+// may take a while: it may look a name up.
+func (p *clientConnPool) coalesceLocked(req *http.Request, addr string) *ClientConn {
+	var offered []*ClientConn
+	var conns []net.Conn
+	for _, cc := range p.made {
+		if cc.CanTakeNewRequest() {
+			offered = append(offered, cc)
+			conns = append(conns, cc.tconn)
+		}
+	}
+	if len(offered) == 0 {
+		return nil
+	}
+	p.mu.Unlock()
+	chosen := p.t.Coalesce(req, addr, conns)
+	p.mu.Lock()
+	for i, cc := range offered {
+		// Still the pool's, and still able to take it: the lock was let go.
+		if conns[i] == chosen && len(p.keys[cc]) > 0 && cc.CanTakeNewRequest() {
+			p.addConnLocked(addr, cc)
+			return cc
+		}
+	}
+	return nil
 }
 
 // dialCall is an in-flight Transport dial call to a host.
@@ -217,6 +257,9 @@ func (p *clientConnPool) addConnLocked(key string, cc *ClientConn) {
 	if p.keys == nil {
 		p.keys = make(map[*ClientConn][]string)
 	}
+	if len(p.keys[cc]) == 0 {
+		p.made = append(p.made, cc)
+	}
 	p.conns[key] = append(p.conns[key], cc)
 	p.keys[cc] = append(p.keys[cc], key)
 }
@@ -237,6 +280,7 @@ func (p *clientConnPool) MarkDead(cc *ClientConn) {
 		}
 	}
 	delete(p.keys, cc)
+	p.made = filterOutClientConn(p.made, cc)
 }
 
 func (p *clientConnPool) closeIdleConnections() {
