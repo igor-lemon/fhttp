@@ -54,6 +54,20 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   request 220 on one connection, which a priority per transport made
   tls-forge send on connections of their own. Tests in
   `http2/priority_test.go`.
+- **A connection shared with another host** (`http2.Transport.Coalesce`,
+  and `RoundTripOpt.OnlyCachedConn` honoured): when the default pool holds no
+  connection for a request's host:port that can take it, it asks Coalesce,
+  with the connections it holds that can, in the order they were made,
+  whether the request may go out on one of them instead of on one dialed for
+  it (RFC 9113, section 9.1.1); the one named carries that host:port's
+  requests from then on, while it can take them. A request that asks for its
+  connection to be closed is never shared one. With OnlyCachedConn, the
+  request goes out only on a connection the pool holds or shares, and
+  ErrNoCachedConn says there is none; tried again after one, it may dial.
+  Unset, every connection is dialed for its host:port, as before. Chrome
+  sends a request to another name over an HTTP/2 connection it holds at an
+  address the name has, under a certificate good for it. Tests in
+  `http2/coalesce_test.go`.
 - **The header a request is written with, per protocol**
   (`Request.HeaderFor`, `Request.WrittenHeader`, `ProtocolHTTP1`,
   `ProtocolHTTP2`): once the transport knows the protocol a request goes
