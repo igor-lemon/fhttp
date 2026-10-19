@@ -6,23 +6,56 @@ package http2
 
 import (
 	"bytes"
+	"encoding/binary"
+	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	http "github.com/igor-lemon/fhttp"
 	"github.com/igor-lemon/fhttp/http2/hpack"
 )
 
+// writeLog keeps what each write to a connection wrote.
+type writeLog struct {
+	net.Conn
+	mu     sync.Mutex
+	writes [][]byte
+}
+
+func (c *writeLog) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	c.writes = append(c.writes, bytes.Clone(p))
+	c.mu.Unlock()
+	return c.Conn.Write(p)
+}
+
+// written is what the write that began with stream's HEADERS frame wrote, nil
+// when none did.
+func (c *writeLog) written(stream uint32) []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, w := range c.writes {
+		if len(w) >= frameHeaderLen && FrameType(w[3]) == FrameHeaders &&
+			binary.BigEndian.Uint32(w[5:9])&(1<<31-1) == stream {
+			return w
+		}
+	}
+	return nil
+}
+
 // headerFrames are the payload lengths of the frames that carried the header
 // block of a request with an X-Big of n letters, as a transport whose
 // MaxHeaderFramePayload is limit and whose HEADERS priority is priority (the
 // transport's own for nil) wrote it to a server that said settings, after a
-// first request the server's SETTINGS came before; and whether its HEADERS
-// frame said a priority.
-func headerFrames(t *testing.T, limit uint32, priority *PriorityParam, n int, settings ...Setting) ([]int, bool) {
+// first request the server's SETTINGS came before; whether its HEADERS frame
+// said a priority; and how many bytes the write that began with it wrote.
+func headerFrames(t *testing.T, limit uint32, priority *PriorityParam, n int, settings ...Setting) ([]int, bool, int) {
 	t.Helper()
 	ct := newClientTester(t)
+	writes := &writeLog{Conn: ct.cc}
+	ct.cc = writes
 	ct.tr.MaxHeaderFramePayload = limit
 	ct.tr.HeaderPriority = priority
 	var frames []int
@@ -73,7 +106,7 @@ func headerFrames(t *testing.T, limit uint32, priority *PriorityParam, n int, se
 		}
 	}
 	ct.run()
-	return frames, prioritized
+	return frames, prioritized, len(writes.written(3))
 }
 
 // cut is how a block of total bytes of payload, priority of them the HEADERS
@@ -116,7 +149,7 @@ func TestAHeaderBlockIsCutIntoFramesNoLargerThanAllowed(t *testing.T) {
 		{"a limit that leaves no room but a byte", 3, big, 10, nil, 3, 5, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			frames, prioritized := headerFrames(t, tc.limit, tc.priority, tc.n, tc.settings...)
+			frames, prioritized, wrote := headerFrames(t, tc.limit, tc.priority, tc.n, tc.settings...)
 			total := 0
 			for _, f := range frames {
 				total += f
@@ -124,6 +157,11 @@ func TestAHeaderBlockIsCutIntoFramesNoLargerThanAllowed(t *testing.T) {
 			want := cut(total, tc.cut, tc.priority5)
 			if !slices.Equal(frames, want) || prioritized != (tc.priority5 == 5) || tc.frames > 0 && len(frames) != tc.frames {
 				t.Errorf("frames %v (priority %v), want %v", frames, prioritized, want)
+			}
+			// The block's frames went to the connection in one write, as
+			// Chrome writes them, and nothing else with them.
+			if all := total + len(frames)*frameHeaderLen; wrote != all {
+				t.Errorf("the write of the block wrote %d bytes, want its %d frames' %d", wrote, len(frames), all)
 			}
 		})
 	}

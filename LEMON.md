@@ -125,6 +125,15 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   writes at most 16,374 bytes a frame, whatever the peer allows. Unset, a
   frame is as large as the peer allows, as before. Tests in
   `http2/headerframes_test.go`.
+- **A header block of more than one frame in one write**: its HEADERS and
+  CONTINUATION frames go to the connection at once, so that over TLS a record
+  carries the end of one frame and the start of the next, as Chrome's do (an
+  X-Foo of 30,000 letters: a record of 16,384 bytes and one of the rest).
+  Through the connection's buffer of 4 KiB the HEADERS frame, larger than the
+  buffer, went past it on its own, and the CONTINUATION after it: a record
+  each. A block of one frame is written as before. Tests in
+  `http2/headerframes_test.go` (`writeLog`). Equivalent mutant: a block of
+  one frame taken the same way, which writes the same bytes in one write.
 - **A body sent in DATA frames no larger than allowed**
   (`http2.Transport.MaxDataFramePayload`): with it set, a request's body is
   read and sent that much at a time, each read a DATA frame, the last ending
