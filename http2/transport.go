@@ -646,6 +646,12 @@ func (t *Transport) RoundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 	addr := authorityAddr(req.URL.Scheme, req.URL.Host)
 	for retry := 0; ; retry++ {
 		cc, err := t.getClientConn(req, addr, opt.OnlyCachedConn && retry == 0)
+		var alps alpsError
+		if errors.As(err, &alps) && retry == 0 {
+			// A connection whose ALPS does not read is tried once more on
+			// another, as Chrome tries it.
+			continue
+		}
 		if err != nil {
 			t.vlogf("http2: Transport failed to get client conn for %s: %v", addr, err)
 
@@ -974,6 +980,24 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	if cc.werr != nil {
 		cc.Close()
 		return nil, cc.werr
+	}
+
+	// What the server gave in ALPS for h2, taken before the first request
+	// as Chrome takes it: ALPS that does not read ends the connection with
+	// GOAWAY, after the preface and SETTINGS, as Chrome's does.
+	if cc.tlsState != nil {
+		if err := cc.takeALPS(cc.tlsState.PeerApplicationSettings); err != nil {
+			code, debug := ErrCodeProtocol, ""
+			if e, ok := err.(alpsError); ok {
+				debug = e.debug()
+			} else if e, ok := err.(ConnectionError); ok {
+				code = ErrCode(e)
+			}
+			cc.fr.WriteGoAway(0, code, []byte(debug))
+			cc.bw.Flush()
+			cc.tconn.Close()
+			return nil, err
+		}
 	}
 
 	go cc.readLoop()
@@ -2888,62 +2912,7 @@ func (rl *clientConnReadLoop) processSettings(f *SettingsFrame) error {
 		return ConnectionError(ErrCodeProtocol)
 	}
 
-	err := f.ForeachSetting(func(s Setting) error {
-		switch s.ID {
-		case SettingMaxFrameSize:
-			cc.maxFrameSize = s.Val
-		case SettingMaxConcurrentStreams:
-			cc.maxConcurrentStreams = s.Val
-		case SettingMaxHeaderListSize:
-			cc.peerMaxHeaderListSize = uint64(s.Val)
-		case SettingInitialWindowSize:
-			// Values above the maximum flow-control
-			// window size of 2^31-1 MUST be treated as a
-			// connection error (Section 5.4.1) of type
-			// FLOW_CONTROL_ERROR.
-			if s.Val > math.MaxInt32 {
-				return ConnectionError(ErrCodeFlowControl)
-			}
-
-			// Adjust flow control of currently-open
-			// frames by the difference of the old initial
-			// window size and this one.
-			delta := int32(s.Val) - int32(cc.initialWindowSize)
-			for _, cs := range cc.streams {
-				cs.flow.add(delta)
-			}
-			cc.cond.Broadcast()
-
-			cc.initialWindowSize = s.Val
-		case SettingHeaderTableSize:
-			// Honor the peer's advertised maximum HPACK dynamic table size
-			// for our request-header encoder (RFC 7541 §4.2 / §6.3). henc is
-			// guarded by cc.mu, which is held here.
-			//
-			// We cap the effective size at MaxEncoderHeaderTableSize (4096
-			// unless set; Chrome takes all the peer allows) and only touch
-			// the encoder when the effective size actually changes.
-			// Consequently a peer that allows what the encoder already has is
-			// a no-op and emits NO Dynamic Table Size Update, as Chrome emits
-			// none. A peer that advertises a table size below it (e.g. 0) is
-			// told of the smaller table; previously the encoder kept indexing
-			// up to 4096 in violation of the peer's limit.
-			effectiveTableSize := min(s.Val, cc.t.maxEncoderHeaderTableSize())
-			if effectiveTableSize != cc.hencMaxTableSize {
-				cc.henc.SetMaxDynamicTableSize(effectiveTableSize)
-				cc.hencMaxTableSize = effectiveTableSize
-			}
-		case SettingEnableConnectProtocol:
-			if err := s.Valid(); err != nil {
-				return err
-			}
-		default:
-			// TODO(bradfitz): handle more settings?
-			cc.vlogf("Unhandled Setting: %v", s)
-		}
-
-		return nil
-	})
+	err := f.ForeachSetting(cc.applySetting)
 	if err != nil {
 		return err
 	}
@@ -2955,6 +2924,65 @@ func (rl *clientConnReadLoop) processSettings(f *SettingsFrame) error {
 	cc.bw.Flush()
 
 	return cc.werr
+}
+
+// applySetting takes a setting of the server's, from a SETTINGS frame or from
+// ALPS. cc.mu must be held.
+func (cc *ClientConn) applySetting(s Setting) error {
+	switch s.ID {
+	case SettingMaxFrameSize:
+		cc.maxFrameSize = s.Val
+	case SettingMaxConcurrentStreams:
+		cc.maxConcurrentStreams = s.Val
+	case SettingMaxHeaderListSize:
+		cc.peerMaxHeaderListSize = uint64(s.Val)
+	case SettingInitialWindowSize:
+		// Values above the maximum flow-control
+		// window size of 2^31-1 MUST be treated as a
+		// connection error (Section 5.4.1) of type
+		// FLOW_CONTROL_ERROR.
+		if s.Val > math.MaxInt32 {
+			return ConnectionError(ErrCodeFlowControl)
+		}
+
+		// Adjust flow control of currently-open
+		// frames by the difference of the old initial
+		// window size and this one.
+		delta := int32(s.Val) - int32(cc.initialWindowSize)
+		for _, cs := range cc.streams {
+			cs.flow.add(delta)
+		}
+		cc.cond.Broadcast()
+
+		cc.initialWindowSize = s.Val
+	case SettingHeaderTableSize:
+		// Honor the peer's advertised maximum HPACK dynamic table size
+		// for our request-header encoder (RFC 7541 §4.2 / §6.3). henc is
+		// guarded by cc.mu, which is held here.
+		//
+		// We cap the effective size at MaxEncoderHeaderTableSize (4096
+		// unless set; Chrome takes all the peer allows) and only touch
+		// the encoder when the effective size actually changes.
+		// Consequently a peer that allows what the encoder already has is
+		// a no-op and emits NO Dynamic Table Size Update, as Chrome emits
+		// none. A peer that advertises a table size below it (e.g. 0) is
+		// told of the smaller table; previously the encoder kept indexing
+		// up to 4096 in violation of the peer's limit.
+		effectiveTableSize := min(s.Val, cc.t.maxEncoderHeaderTableSize())
+		if effectiveTableSize != cc.hencMaxTableSize {
+			cc.henc.SetMaxDynamicTableSize(effectiveTableSize)
+			cc.hencMaxTableSize = effectiveTableSize
+		}
+	case SettingEnableConnectProtocol:
+		if err := s.Valid(); err != nil {
+			return err
+		}
+	default:
+		// TODO(bradfitz): handle more settings?
+		cc.vlogf("Unhandled Setting: %v", s)
+	}
+
+	return nil
 }
 
 func (rl *clientConnReadLoop) processWindowUpdate(f *WindowUpdateFrame) error {
