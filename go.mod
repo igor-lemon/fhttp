@@ -11,7 +11,7 @@ require (
 
 require (
 	github.com/cloudflare/circl v1.6.2 // indirect
-	github.com/igor-lemon/utls v1.7.8-barnius.0.20261019134924-8ce0abf27ca1
+	github.com/igor-lemon/utls v1.7.8-barnius.0.20261019181339-54318cac598d
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
