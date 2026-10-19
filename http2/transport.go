@@ -1519,15 +1519,26 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 	if limit := int(cc.t.MaxHeaderFramePayload); limit > 0 && limit < maxFrameSize {
 		maxFrameSize = limit
 	}
+	// A HEADERS frame's priority is five bytes of its payload, which the
+	// fragment it carries leaves room for: a full fragment and the priority
+	// made a frame larger than the peer allows.
+	room := maxFrameSize
+	if !priority.IsZero() {
+		room = max(room-5, 1)
+	}
+	// A block of more than one frame goes to the connection in one write, as
+	// Chrome writes it, so that a TLS record carries the end of one frame and
+	// the start of the next: through the connection's buffer the HEADERS
+	// frame, larger than the buffer, was written on its own.
+	fr := cc.fr
+	var frames *bytes.Buffer
+	if len(hdrs) > room {
+		frames = new(bytes.Buffer)
+		frames.Grow(len(hdrs) + (len(hdrs)/maxFrameSize+2)*(frameHeaderLen+5))
+		fr = NewFramer(frames, nil)
+	}
 	first := true // first frame written (HEADERS is first, then CONTINUATION)
 	for len(hdrs) > 0 && cc.werr == nil {
-		// A HEADERS frame's priority is five bytes of its payload, which the
-		// fragment it carries leaves room for: a full fragment and the
-		// priority made a frame larger than the peer allows.
-		room := maxFrameSize
-		if first && !priority.IsZero() {
-			room = max(room-5, 1)
-		}
 		chunk := hdrs
 		if len(chunk) > room {
 			chunk = chunk[:room]
@@ -1535,7 +1546,7 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 		hdrs = hdrs[len(chunk):]
 		endHeaders := len(hdrs) == 0
 		if first {
-			cc.fr.WriteHeaders(HeadersFrameParam{
+			fr.WriteHeaders(HeadersFrameParam{
 				StreamID:      streamID,
 				BlockFragment: chunk,
 				EndStream:     endStream,
@@ -1544,8 +1555,16 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 			})
 			first = false
 		} else {
-			cc.fr.WriteContinuation(streamID, endHeaders, chunk)
+			fr.WriteContinuation(streamID, endHeaders, chunk)
 		}
+		room = maxFrameSize
+	}
+	if frames != nil {
+		// Every write under cc.wmu is flushed before the lock is let go, but
+		// the GOAWAY of a connection that is ending: the block, larger than
+		// the buffer, goes past it in one write, and one a smaller limit cut
+		// goes with the flush below.
+		cc.bw.Write(frames.Bytes())
 	}
 	// TODO(bradfitz): this Flush could potentially block (as
 	// could the WriteHeaders call(s) above), which means they
