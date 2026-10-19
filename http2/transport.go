@@ -131,6 +131,15 @@ type Transport struct {
 	// transport's own rule.
 	WindowUpdateDelay time.Duration
 
+	// MaxHeaderFramePayload, when set below the peer's
+	// SETTINGS_MAX_FRAME_SIZE, is the largest payload of a HEADERS or
+	// CONTINUATION frame the transport writes. Either way a header block is
+	// cut into frames that each carry as much as is allowed, a HEADERS frame's
+	// priority counted in its payload. Chrome writes at most 16,374 bytes in
+	// each, whatever the peer allows. Zero lets a frame be as large as the
+	// peer allows.
+	MaxHeaderFramePayload uint32
+
 	// IdleConnTimeout is the maximum amount of time an idle (keep-alive)
 	// connection will remain idle before closing itself. Zero means no limit.
 	IdleConnTimeout time.Duration
@@ -1499,11 +1508,21 @@ func (cc *ClientConn) awaitOpenSlotForRequest(req *http.Request) error {
 
 // requires cc.wmu be held
 func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize int, hdrs []byte, priority PriorityParam) error {
+	if limit := int(cc.t.MaxHeaderFramePayload); limit > 0 && limit < maxFrameSize {
+		maxFrameSize = limit
+	}
 	first := true // first frame written (HEADERS is first, then CONTINUATION)
 	for len(hdrs) > 0 && cc.werr == nil {
+		// A HEADERS frame's priority is five bytes of its payload, which the
+		// fragment it carries leaves room for: a full fragment and the
+		// priority made a frame larger than the peer allows.
+		room := maxFrameSize
+		if first && !priority.IsZero() {
+			room = max(room-5, 1)
+		}
 		chunk := hdrs
-		if len(chunk) > maxFrameSize {
-			chunk = chunk[:maxFrameSize]
+		if len(chunk) > room {
+			chunk = chunk[:room]
 		}
 		hdrs = hdrs[len(chunk):]
 		endHeaders := len(hdrs) == 0
