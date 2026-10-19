@@ -153,6 +153,20 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   body), the error of a head's write (bufio's sticky error fails the flush
   the same way), and `closed` where the body is merged (an in-memory body's
   Close does nothing).
+- **ALPS taken as Chrome takes it** (`http2/alps.go`): what a server gave
+  in ALPS for h2 (the TLS state's `PeerApplicationSettings`) is read as
+  HTTP/2 frames before the connection's first request: its SETTINGS applied
+  as a SETTINGS frame's are (`ClientConn.applySetting`, taken out of
+  `processSettings`), unacknowledged; a frame of a type HTTP/2 does not have,
+  ACCEPT_CH among them, passed over. ALPS that does not read ends the
+  connection after the preface and SETTINGS with GOAWAY PROTOCOL_ERROR saying
+  `Error parsing ALPS: N`, Chrome's AlpsDecoder::Error (1 a frame that does
+  not read, 2 a frame ALPS may not carry, 3 a frame cut short, 4 a SETTINGS
+  acknowledgement, in that order when there are several), and the request
+  is tried once more on another connection, as Chrome tries it; a setting
+  the transport refuses ends it with that setting's error. Measured on
+  Chrome 155 against tls-forge's bench, which gives ALPS. Tests in
+  `http2/alps_test.go`; 15 mutants, all killed.
 - **A body sent in DATA frames no larger than allowed**
   (`http2.Transport.MaxDataFramePayload`): with it set, a request's body is
   read and sent that much at a time, each read a DATA frame, the last ending
