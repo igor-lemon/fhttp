@@ -15,6 +15,9 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   then `git diff --name-only -- '*.go' | xargs gofmt -w`, which puts the
   renamed imports back in order.
 
+- utls is `github.com/igor-lemon/utls`, tls-forge's fork of
+  bogdanfinn/utls (its `LEMON.md` says what it changes): every import of
+  `github.com/bogdanfinn/utls` is renamed the same way.
 - `LICENSE` is Go's: fhttp is a fork of the Go standard library's net/http,
   and ships none.
 - At the base, upstream as here, 32 tests of the package itself fail
