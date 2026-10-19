@@ -7,6 +7,8 @@
 package http2
 
 import (
+	"context"
+	"errors"
 	"net"
 	"slices"
 	"sync"
@@ -87,43 +89,54 @@ func (p *clientConnPool) getClientConn(req *http.Request, addr string, dialOnMis
 		// It gets its own connection.
 		traceGetConn(req, addr)
 		const singleUse = true
-		cc, err := p.t.dialClientConn(addr, singleUse)
+		cc, err := p.t.dialClientConn(req.Context(), addr, singleUse)
 		if err != nil {
 			return nil, err
 		}
 		return cc, nil
 	}
-	p.mu.Lock()
-	shares := mayCoalesce(req)
-	for _, cc := range p.conns[addr] {
-		if !shares && p.keys[cc][0] != addr {
-			// Dialed for another host:port.
+	for {
+		p.mu.Lock()
+		shares := mayCoalesce(req)
+		for _, cc := range p.conns[addr] {
+			if !shares && p.keys[cc][0] != addr {
+				// Dialed for another host:port.
+				continue
+			}
+			if st := cc.idleState(); st.canTakeNewRequest {
+				if p.shouldTraceGetConn(st) {
+					traceGetConn(req, addr)
+				}
+				p.mu.Unlock()
+				return cc, nil
+			}
+		}
+		if shares && p.t.Coalesce != nil && !isConnectionCloseRequest(req) {
+			if cc := p.coalesceLocked(req, addr); cc != nil {
+				traceGetConn(req, addr)
+				p.mu.Unlock()
+				return cc, nil
+			}
+		}
+		if !dialOnMiss {
+			p.mu.Unlock()
+			return nil, ErrNoCachedConn
+		}
+		traceGetConn(req, addr)
+		call := p.getStartDialLocked(req.Context(), addr)
+		p.mu.Unlock()
+		// No longer than the request is wanted: the dial goes on for the
+		// request it was started for, and ends with that one's context.
+		select {
+		case <-call.done:
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
+		if shouldRetryDial(call, req) {
 			continue
 		}
-		if st := cc.idleState(); st.canTakeNewRequest {
-			if p.shouldTraceGetConn(st) {
-				traceGetConn(req, addr)
-			}
-			p.mu.Unlock()
-			return cc, nil
-		}
+		return call.res, call.err
 	}
-	if shares && p.t.Coalesce != nil && !isConnectionCloseRequest(req) {
-		if cc := p.coalesceLocked(req, addr); cc != nil {
-			traceGetConn(req, addr)
-			p.mu.Unlock()
-			return cc, nil
-		}
-	}
-	if !dialOnMiss {
-		p.mu.Unlock()
-		return nil, ErrNoCachedConn
-	}
-	traceGetConn(req, addr)
-	call := p.getStartDialLocked(addr)
-	p.mu.Unlock()
-	<-call.done
-	return call.res, call.err
 }
 
 // coalesceLocked is a conn of the pool's to another host:port that
@@ -157,33 +170,37 @@ func (p *clientConnPool) coalesceLocked(req *http.Request, addr string) *ClientC
 
 // dialCall is an in-flight Transport dial call to a host.
 type dialCall struct {
-	_    incomparable
-	p    *clientConnPool
+	_ incomparable
+	p *clientConnPool
+	// ctx is the context of the request the dial was started for, which the
+	// dial ends with.
+	ctx  context.Context
 	done chan struct{} // closed when done
 	res  *ClientConn   // valid after done is closed
 	err  error         // valid after done is closed
 }
 
 // requires p.mu is held.
-func (p *clientConnPool) getStartDialLocked(addr string) *dialCall {
+func (p *clientConnPool) getStartDialLocked(ctx context.Context, addr string) *dialCall {
 	if call, ok := p.dialing[addr]; ok {
 		// A dial is already in-flight. Don't start another.
 		return call
 	}
-	call := &dialCall{p: p, done: make(chan struct{})}
+	call := &dialCall{p: p, ctx: ctx, done: make(chan struct{})}
 	if p.dialing == nil {
 		p.dialing = make(map[string]*dialCall)
 	}
 	p.dialing[addr] = call
-	go call.dial(addr)
+	go call.dial(ctx, addr)
 	return call
 }
 
-// run in its own goroutine.
-func (c *dialCall) dial(addr string) {
+// run in its own goroutine. The pool has its conn, and no longer holds the
+// call, before done is closed: a request that dials again once it is closed
+// starts a dial of its own.
+func (c *dialCall) dial(ctx context.Context, addr string) {
 	const singleUse = false // shared conn
-	c.res, c.err = c.p.t.dialClientConn(addr, singleUse)
-	close(c.done)
+	c.res, c.err = c.p.t.dialClientConn(ctx, addr, singleUse)
 
 	c.p.mu.Lock()
 	delete(c.p.dialing, addr)
@@ -191,6 +208,20 @@ func (c *dialCall) dial(addr string) {
 		c.p.addConnLocked(addr, c.res)
 	}
 	c.p.mu.Unlock()
+	close(c.done)
+}
+
+// shouldRetryDial says req dials again after call failed: the context that
+// ended the dial was another request's. A call that dialed has no error, and
+// none of a context's.
+func shouldRetryDial(call *dialCall, req *http.Request) bool {
+	if call.ctx == req.Context() {
+		return false
+	}
+	if !errors.Is(call.err, context.Canceled) && !errors.Is(call.err, context.DeadlineExceeded) {
+		return false
+	}
+	return call.ctx.Err() != nil
 }
 
 // addConnIfNeeded makes a NewClientConn out of c if a connection for key doesn't

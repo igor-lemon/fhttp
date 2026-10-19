@@ -192,3 +192,20 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   `http2/dataframes_test.go`. Equivalent mutant: reading more than the peer
   allows a frame (`readSize = limit` without the `min`), since the window's
   take is cut to the peer's frame size.
+- **A dial that ends with its request's context**
+  (`http2.Transport.DialTLSContext`, x/net's name and meaning): a connection
+  is dialed with the context of the request it is dialed for, which ends the
+  dial and its handshake; DialTLS, which takes none, is used without it, and
+  the default dial takes it too. A request waiting for a connection another
+  request's dial is opening waits no longer than its own context lets it,
+  and dials for itself when the other request's context ended that dial
+  (x/net's shouldRetryDial); a dial that failed of itself fails every
+  request waiting for it, as before. The pool takes the connection and
+  forgets the dial before it says the dial is done, so a request that dials
+  again starts a dial of its own. Before, the pool dialed with no context,
+  and a request waited for a dial however long it took: a server that took
+  the TCP connection and never answered the handshake held the request, and
+  every other one to it, past their deadlines and for good. Tests in
+  `http2/dialcontext_test.go`; 15 mutants, all killed but one equivalent
+  (the dial said done before it is forgotten: a request that dials again then
+  finds the finished dial, and goes round until it is forgotten).

@@ -87,10 +87,24 @@ type Transport struct {
 	connPoolOnce  sync.Once
 	connPoolOrDef ClientConnPool // non-nil version of ConnPool
 
-	// DialTLS specifies an optional dial function for creating
-	// TLS connections for requests.
+	// DialTLSContext specifies an optional dial function with context for
+	// creating TLS connections for requests: the context of the request the
+	// connection is dialed for, which the dial is to end with. A request
+	// waiting for a connection another request's dial is opening waits no
+	// longer than its own context lets it, and dials again for itself when
+	// that dial ended with the other request's context.
 	//
-	// If DialTLS is nil, tls.Dial is used.
+	// If DialTLSContext and DialTLS are nil, tls.Dial is used.
+	//
+	// If the returned net.Conn has a ConnectionState method like tls.Conn,
+	// it will be used to set http.Response.TLS.
+	DialTLSContext func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error)
+
+	// DialTLS specifies an optional dial function for creating
+	// TLS connections for requests, used when DialTLSContext is nil. It
+	// ends with no request's context.
+	//
+	// If DialTLSContext and DialTLS are nil, tls.Dial is used.
 	//
 	// If the returned net.Conn has a ConnectionState method like tls.Conn,
 	// it will be used to set http.Response.TLS.
@@ -756,12 +770,12 @@ func canRetryError(err error) bool {
 	return false
 }
 
-func (t *Transport) dialClientConn(addr string, singleUse bool) (*ClientConn, error) {
+func (t *Transport) dialClientConn(ctx context.Context, addr string, singleUse bool) (*ClientConn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
-	tconn, err := t.dialTLS()("tcp", addr, t.newTLSConfig(host))
+	tconn, err := t.dialTLS(ctx, "tcp", addr, t.newTLSConfig(host))
 	if err != nil {
 		return nil, err
 	}
@@ -784,22 +798,23 @@ func (t *Transport) newTLSConfig(host string) *tls.Config {
 	return cfg
 }
 
-func (t *Transport) dialTLS() func(string, string, *tls.Config) (net.Conn, error) {
-	if t.DialTLS != nil {
-		return t.DialTLS
+func (t *Transport) dialTLS(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+	switch {
+	case t.DialTLSContext != nil:
+		return t.DialTLSContext(ctx, network, addr, cfg)
+	case t.DialTLS != nil:
+		return t.DialTLS(network, addr, cfg)
 	}
 
-	return t.dialTLSDefault
+	return t.dialTLSDefault(ctx, network, addr, cfg)
 }
 
-func (t *Transport) dialTLSDefault(network, addr string, cfg *tls.Config) (net.Conn, error) {
-	cn, err := tls.Dial(network, addr, cfg)
+func (t *Transport) dialTLSDefault(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+	dialed, err := (&tls.Dialer{Config: cfg}).DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
-	if err := cn.Handshake(); err != nil {
-		return nil, err
-	}
+	cn := dialed.(*tls.Conn)
 	if !cfg.InsecureSkipVerify {
 		if err := cn.VerifyHostname(cfg.ServerName); err != nil {
 			return nil, err
