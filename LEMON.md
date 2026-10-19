@@ -115,3 +115,13 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   and ALPN, encrypted in TLS 1.3, says which only after the handshake;
   tls-forge had changed the header in place from the trace's GotConn. Tests
   in `headerfor_test.go` and `http2/headerfor_test.go`.
+- **A header block cut into frames no larger than allowed**
+  (`http2.Transport.MaxHeaderFramePayload`, and room for the priority): a
+  HEADERS frame's fragment leaves room for its five bytes of priority, which
+  a full fragment and the priority took past the peer's
+  SETTINGS_MAX_FRAME_SIZE, a frame the peer refuses with FRAME_SIZE_ERROR;
+  and with MaxHeaderFramePayload set below the peer's, every HEADERS and
+  CONTINUATION frame carries at most that much, priority included. Chrome
+  writes at most 16,374 bytes a frame, whatever the peer allows. Unset, a
+  frame is as large as the peer allows, as before. Tests in
+  `http2/headerframes_test.go`.
