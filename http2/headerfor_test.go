@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	tls "github.com/bogdanfinn/utls"
 	http "github.com/igor-lemon/fhttp"
+	tls "github.com/igor-lemon/utls"
 )
 
 func TestTransportWritesTheHeaderItsHeaderForGives(t *testing.T) {

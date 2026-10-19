@@ -31,7 +31,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/igor-lemon/utls"
 	"io"
 	"io/ioutil"
 	"log"
@@ -8390,7 +8390,6 @@ var (
 	// abort request body write, but send stream reset of cancel.
 	http2errStopReqBodyWriteAndCancel = errors.New("http2: canceling request")
 )
-
 
 // frameScratchBufferLen returns the length of a buffer to use for
 // outgoing request bodies to read/write to/from.

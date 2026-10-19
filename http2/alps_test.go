@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	tls "github.com/bogdanfinn/utls"
 	http "github.com/igor-lemon/fhttp"
 	"github.com/igor-lemon/fhttp/http2/hpack"
+	tls "github.com/igor-lemon/utls"
 )
 
 // alpsConn is a connection whose TLS gave alps as ALPS for h2.

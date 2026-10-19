@@ -27,7 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/igor-lemon/utls"
 
 	http "github.com/igor-lemon/fhttp"
 	"github.com/igor-lemon/fhttp/httptrace"
