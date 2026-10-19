@@ -134,6 +134,25 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   each. A block of one frame is written as before. Tests in
   `http2/headerframes_test.go` (`writeLog`). Equivalent mutant: a block of
   one frame taken the same way, which writes the same bytes in one write.
+- **A request written over HTTP/1.1 as Chrome writes it**
+  (`http.Transport.MaxMergedHeadAndBody`): with it set, a request's head,
+  the request line and the header lines, is put together whole and given to
+  the connection in one write, whatever its size, and a body held in memory
+  (`heldInMemory`: a bytes.Reader, bytes.Buffer or strings.Reader, as it is
+  or in an io.NopCloser or a readTrackingBody) of a known length goes in the
+  same write when the two are no more than that many bytes together; any
+  other body after the head, as before. Chrome's HttpStreamParser merges up
+  to 1,400 bytes (kMaxMergedHeaderAndBodySize) and writes a head at once,
+  where the connection's buffer of 4 KiB cut a larger head into pieces of
+  its size. Unset, a request is written as before: `isKnownInMemoryReader`
+  is left as it was, though it misses the io.NopCloser of every in-memory
+  reader since Go 1.20 (nopCloserWriterTo), so the head is flushed before
+  every body there. Tests in `headwrites_test.go` and
+  `headwrites_internal_test.go`; `TestTransportClone` sets the field.
+  Equivalent mutants: the new path's `FlushHeaders` (set already for every
+  body), the error of a head's write (bufio's sticky error fails the flush
+  the same way), and `closed` where the body is merged (an in-memory body's
+  Close does nothing).
 - **A body sent in DATA frames no larger than allowed**
   (`http2.Transport.MaxDataFramePayload`): with it set, a request's body is
   read and sent that much at a time, each read a DATA frame, the last ending

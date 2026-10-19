@@ -275,6 +275,18 @@ type Transport struct {
 	// If zero, a default (currently 4KB) is used.
 	ReadBufferSize int
 
+	// MaxMergedHeadAndBody, when set, has a request written over HTTP/1.1
+	// as Chrome's network stack writes one: its head, the request line and
+	// the header lines, put together whole and written at once, whatever
+	// its size; and a body held in memory, of a known length, in the same
+	// write when the head and it are no more than MaxMergedHeadAndBody
+	// bytes together (Chrome's kMaxMergedHeaderAndBodySize, 1400), any
+	// other body after the head, as before. Unset, a request goes through
+	// the connection's buffer, a head larger than it in pieces of its size,
+	// and the head is flushed before any body but one of a type the
+	// transport knows to be in memory, which goes with it.
+	MaxMergedHeadAndBody int
+
 	// nextProtoOnce guards initialization of TLSNextProto and
 	// h2transport (via onceSetNextProtoDefaults)
 	nextProtoOnce      sync.Once
@@ -337,6 +349,7 @@ func (t *Transport) Clone() *Transport {
 		ForceAttemptHTTP2:      t.ForceAttemptHTTP2,
 		WriteBufferSize:        t.WriteBufferSize,
 		ReadBufferSize:         t.ReadBufferSize,
+		MaxMergedHeadAndBody:   t.MaxMergedHeadAndBody,
 	}
 	if t.TLSClientConfig != nil {
 		t2.TLSClientConfig = t.TLSClientConfig.Clone()
@@ -2387,7 +2400,8 @@ func (pc *persistConn) writeLoop() {
 		select {
 		case wr := <-pc.writech:
 			startBytesWritten := pc.nwrite
-			err := wr.req.Request.write(pc.bw, pc.isProxy, wr.req.extra, pc.waitForContinue(wr.continueCh))
+			err := wr.req.Request.write(pc.bw, pc.isProxy, wr.req.extra, pc.waitForContinue(wr.continueCh),
+				pc.t.MaxMergedHeadAndBody)
 			if bre, ok := err.(requestBodyReadError); ok {
 				err = bre.error
 				// Errors reading from the user's

@@ -537,7 +537,7 @@ const defaultUserAgent = "Go-http-client/1.1"
 // hasn't been set to "identity", Write adds "Transfer-Encoding:
 // chunked" to the header. Body is closed after it is sent.
 func (r *Request) Write(w io.Writer) error {
-	return r.write(w, false, nil, nil)
+	return r.write(w, false, nil, nil, 0)
 }
 
 // WriteProxy is like Write but writes the request in the form
@@ -547,7 +547,7 @@ func (r *Request) Write(w io.Writer) error {
 // In either case, WriteProxy also writes a Host header, using
 // either r.Host or r.URL.Host.
 func (r *Request) WriteProxy(w io.Writer) error {
-	return r.write(w, true, nil, nil)
+	return r.write(w, true, nil, nil, 0)
 }
 
 // errMissingHost is returned by Write when there is no Host or URL present in
@@ -557,7 +557,12 @@ var errMissingHost = errors.New("http: Request.Write on Request with no Host or 
 // extraHeaders may be nil
 // waitForContinue may be nil
 // always closes body
-func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitForContinue func() bool) (err error) {
+// write writes r to w. With merge above zero it writes it as Chrome does
+// (Transport.MaxMergedHeadAndBody): its head put together whole and given to w
+// in one write, and a body held in memory in the same write when the two are
+// no more than merge bytes together.
+func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitForContinue func() bool,
+	merge int) (err error) {
 	trace := httptrace.ContextClientTrace(r.Context())
 	if trace != nil && trace.WroteRequest != nil {
 		defer func() {
@@ -614,8 +619,15 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	// Don't always call NewWriter, as that forces a bytes.Buffer
 	// and other small bufio Writers to have a minimum 4k buffer
 	// size.
+	// Written as Chrome writes it, the head is put together here, and given
+	// to w, to, once it is whole: in one write, which needs no buffer.
 	var bw *bufio.Writer
-	if _, ok := w.(io.ByteWriter); !ok {
+	var head *bytes.Buffer
+	to := w
+	if merge > 0 {
+		head = new(bytes.Buffer)
+		w = head
+	} else if _, ok := w.(io.ByteWriter); !ok {
 		bw = bufio.NewWriter(w)
 		w = bw
 	}
@@ -674,6 +686,26 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 
 	if trace != nil && trace.WroteHeaders != nil {
 		trace.WroteHeaders()
+	}
+
+	if head != nil {
+		w = to
+		if waitForContinue == nil && tw.mergesWith(head.Len(), merge) {
+			// The body goes in the head's write. Held in memory, it can
+			// only fall short of its length.
+			closed = true
+			if err := tw.writeBody(head); err != nil {
+				return err
+			}
+			_, err = w.Write(head.Bytes())
+			return err
+		}
+		// The head is a write of its own: a buffer smaller than it lets it
+		// past whole, and one that takes it is flushed before the body.
+		if _, err := w.Write(head.Bytes()); err != nil {
+			return err
+		}
+		tw.FlushHeaders = true
 	}
 
 	// Flush and wait for 100-continue if expected.

@@ -1126,6 +1126,36 @@ func (fr finishAsyncByteRead) Read(p []byte) (n int, err error) {
 
 var nopCloserType = reflect.TypeOf(io.NopCloser(nil))
 
+// nopCloserWriterToType is what io.NopCloser makes of a reader with a WriteTo
+// method, as every reader heldInMemory knows has, since Go 1.20.
+var nopCloserWriterToType = reflect.TypeOf(io.NopCloser(bytes.NewReader(nil)))
+
+// heldInMemory reports whether r is a body held in memory: a *bytes.Reader, a
+// *bytes.Buffer or a *strings.Reader, as it is or in the io.NopCloser or the
+// readTrackingBody a request's body comes in. isKnownInMemoryReader does not
+// see through the io.NopCloser of any of them, which has had a type of its own
+// since Go 1.20, and is kept as it was for the requests it decides on.
+func heldInMemory(r io.Reader) bool {
+	switch r := r.(type) {
+	case *bytes.Reader, *bytes.Buffer, *strings.Reader:
+		return true
+	case *readTrackingBody:
+		return heldInMemory(r.ReadCloser)
+	}
+	if t := reflect.TypeOf(r); t == nopCloserType || t == nopCloserWriterToType {
+		return heldInMemory(reflect.ValueOf(r).Field(0).Interface().(io.Reader))
+	}
+	return false
+}
+
+// mergesWith reports whether a request's body goes in the write of its head,
+// of n bytes, as Chrome's HttpStreamParser merges them: a body of a known
+// length held in memory, the two no more than limit bytes together.
+func (t *transferWriter) mergesWith(n, limit int) bool {
+	return t.ContentLength > 0 && !chunked(t.TransferEncoding) && heldInMemory(t.Body) &&
+		int64(n)+t.ContentLength <= int64(limit)
+}
+
 // isKnownInMemoryReader reports whether r is a type known to not
 // block on Read. Its caller uses this as an optional optimization to
 // send fewer TCP packets.
