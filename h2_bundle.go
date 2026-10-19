@@ -8464,7 +8464,6 @@ var (
 	http2errStopReqBodyWriteAndCancel = errors.New("http2: canceling request")
 )
 
-
 // frameScratchBufferLen returns the length of a buffer to use for
 // outgoing request bodies to read/write to/from.
 //
