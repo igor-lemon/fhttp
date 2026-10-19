@@ -140,6 +140,14 @@ type Transport struct {
 	// peer allows.
 	MaxHeaderFramePayload uint32
 
+	// MaxDataFramePayload, when set below the peer's SETTINGS_MAX_FRAME_SIZE,
+	// is the largest payload of a DATA frame of a request's body the
+	// transport writes: the body is read and sent that much at a time, as the
+	// windows allow. Chrome writes at most 16,375 bytes a frame, which with its
+	// header fills a TLS record of 16,384. Zero lets a frame be as large as
+	// the peer allows.
+	MaxDataFramePayload uint32
+
 	// IdleConnTimeout is the maximum amount of time an idle (keep-alive)
 	// connection will remain idle before closing itself. Zero means no limit.
 	IdleConnTimeout time.Duration
@@ -1632,9 +1640,14 @@ func (cs *clientStream) writeRequestBody(body io.Reader, bodyCloser io.Closer) (
 	cc.mu.Lock()
 	maxFrameSize := int(cc.maxFrameSize)
 	cc.mu.Unlock()
+	// Read as much as a frame carries at a time: each read is a frame.
+	readSize := maxFrameSize
+	if limit := int(cc.t.MaxDataFramePayload); limit > 0 {
+		readSize = min(readSize, limit)
+	}
 
 	// Scratch buffer for reading into & writing from.
-	scratchLen := cs.frameScratchBufferLen(maxFrameSize)
+	scratchLen := cs.frameScratchBufferLen(readSize)
 	var buf []byte
 	if bp, ok := bufPool.Get().(*[]byte); ok && len(*bp) >= scratchLen {
 		defer bufPool.Put(bp)
