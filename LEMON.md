@@ -154,19 +154,32 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   the same way), and `closed` where the body is merged (an in-memory body's
   Close does nothing).
 - **ALPS taken as Chrome takes it** (`http2/alps.go`): what a server gave
-  in ALPS for h2 (the TLS state's `PeerApplicationSettings`) is read as
-  HTTP/2 frames before the connection's first request: its SETTINGS applied
-  as a SETTINGS frame's are (`ClientConn.applySetting`, taken out of
-  `processSettings`), unacknowledged; a frame of a type HTTP/2 does not have,
-  ACCEPT_CH among them, passed over. ALPS that does not read ends the
-  connection after the preface and SETTINGS with GOAWAY PROTOCOL_ERROR saying
-  `Error parsing ALPS: N`, Chrome's AlpsDecoder::Error (1 a frame that does
-  not read, 2 a frame ALPS may not carry, 3 a frame cut short, 4 a SETTINGS
-  acknowledgement, in that order when there are several), and the request
-  is tried once more on another connection, as Chrome tries it; a setting
-  the transport refuses ends it with that setting's error. Measured on
-  Chrome 155 against tls-forge's bench, which gives ALPS. Tests in
-  `http2/alps_test.go`; 15 mutants, all killed.
+  in ALPS for h2 (the TLS state's `PeerApplicationSettings`) is read before
+  the connection's first request as Chrome 155 was measured reading it
+  (tls-forge's bench, 73 scenarios, measured twice): HTTP/2 frames, each held
+  to what HTTP/2 says a frame of its type may be (on a stream or on none, of
+  its length, within 16 KiB, a CONTINUATION where a header block goes on and
+  only there, its padding within it, its header block one HPACK decodes, one
+  decoder for all of ALPS); SETTINGS taken, unacknowledged, as Chromium's
+  SpdySession::HandleSetting takes them (the header table, the streams at a
+  time, a window up to 2^31-1 and one past it passed over;
+  ENABLE_CONNECT_PROTOCOL and NO_RFC7540_PRIORITIES other than 0 or 1
+  refused, whatever was said before them (1 then 0 of either is taken);
+  MAX_FRAME_SIZE, MAX_HEADER_LIST_SIZE and ENABLE_PUSH passed over:
+  `setInitialWindowSize` and `setHeaderTableSize` are taken out of
+  `applySetting`, which the SETTINGS frame keeps); a frame of a type HTTP/2
+  does not have passed over, ALTSVC, ORIGIN, PRIORITY_UPDATE and ACCEPT_CH's
+  entries among them, but an ACCEPT_CH frame on a stream or with flags
+  refused. ALPS Chrome refuses ends the connection after the preface and
+  SETTINGS with GOAWAY PROTOCOL_ERROR saying `Error parsing ALPS: N`
+  (Chromium's AlpsDecoder::Error: 1 a frame that does not read, at once;
+  past the rest 2 a frame ALPS may not carry, then 4 a SETTINGS
+  acknowledgement, then 3 a frame cut short, then 5 an ACCEPT_CH frame on a
+  stream or 6 with flags, the first of these), or Chrome's own words for a
+  setting it refuses; and the request fails, tried on no other connection:
+  the second connection Chrome was measured making is its error page,
+  reloading itself a second later. Tests in `http2/alps_test.go`; 62
+  mutants, all killed.
 - **A body sent in DATA frames no larger than allowed**
   (`http2.Transport.MaxDataFramePayload`): with it set, a request's body is
   read and sent that much at a time, each read a DATA frame, the last ending
