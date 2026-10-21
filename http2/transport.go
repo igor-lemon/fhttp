@@ -58,6 +58,8 @@ const (
 // A Transport internally caches connections to servers. It is safe
 // for concurrent use by multiple goroutines.
 type Transport struct {
+	// ChromeBehavior selects measured Chromium edge-response policies.
+	ChromeBehavior bool
 
 	// AllowHTTP, if true, permits HTTP/2 requests using the insecure,
 	// plain-text "http" scheme. Note that this does not enable h2c support.
@@ -915,6 +917,13 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	cc.bw = bufio.NewWriter(stickyErrWriter{&cc.werr, c})
 	cc.br = bufio.NewReader(c)
 	cc.fr = NewFramer(cc.bw, cc.br)
+	if t.ChromeBehavior {
+		maxRead := uint32(initialMaxFrameSize)
+		if advertised, ok := t.Settings[SettingMaxFrameSize]; ok {
+			maxRead = advertised
+		}
+		cc.fr.SetMaxReadFrameSize(maxRead)
+	}
 
 	customHeaderTableSize, ok := t.Settings[SettingHeaderTableSize]
 
@@ -2226,9 +2235,13 @@ func (cc *ClientConn) readLoop() {
 	rl := &clientConnReadLoop{cc: cc}
 	defer rl.cleanup()
 	cc.readerErr = rl.run()
+	if cc.readerErr == ErrFrameTooLarge {
+		cc.readerErr = ConnectionError(ErrCodeFrameSize)
+	}
 	if ce, ok := cc.readerErr.(ConnectionError); ok {
 		cc.wmu.Lock()
 		cc.fr.WriteGoAway(0, ErrCode(ce), nil)
+		cc.bw.Flush()
 		cc.wmu.Unlock()
 	}
 }
@@ -2311,6 +2324,9 @@ func (rl *clientConnReadLoop) run() error {
 			cc.vlogf("http2: Transport readFrame error on conn %p: (%T) %v", cc, err, err)
 		}
 		if se, ok := err.(StreamError); ok {
+			if cc.t.ChromeBehavior && cc.fr.lastReadType == FrameWindowUpdate && se.Code == ErrCodeProtocol {
+				se.Code = ErrCodeFlowControl
+			}
 			if cs := cc.streamByID(se.StreamID, false); cs != nil {
 				cs.cc.writeStreamReset(cs.ID, se.Code, err)
 				cs.cc.forgetStreamID(cs.ID)
@@ -2465,6 +2481,14 @@ func (rl *clientConnReadLoop) handleResponse(cs *clientStream, f *MetaHeadersFra
 		Status:     status + " " + http.StatusText(statusCode),
 	}
 	for _, hf := range regularFields {
+		switch hf.Name {
+		case "connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade":
+			// Chromium's legacy response parser tolerates Connection/Keep-Alive.
+			// Generic mode keeps RFC9113 8.2.2 validation;Chrome still rejects TE.
+			if !(rl.cc.t.ChromeBehavior && (hf.Name == "connection" || hf.Name == "keep-alive")) {
+				return nil, errors.New("http2: connection-specific response field " + hf.Name)
+			}
+		}
 		key := http.CanonicalHeaderKey(hf.Name)
 		if key == "Trailer" {
 			t := res.Trailer
@@ -2698,7 +2722,7 @@ func (b transportResponseBody) Close() error {
 	if unread > 0 || !serverSentStreamEnd {
 		cc.mu.Lock()
 		cc.wmu.Lock()
-		if !serverSentStreamEnd {
+		if !serverSentStreamEnd && cs.resetErr == nil && !cc.closed {
 			cc.fr.WriteRSTStream(cs.ID, ErrCodeCancel)
 			cs.didReset = true
 		}
@@ -2767,6 +2791,9 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) error {
 		cs.gotEndStream = true
 	}
 	if !cs.firstByte {
+		if cc.t.ChromeBehavior {
+			cs.cc.writeStreamReset(cs.ID, ErrCodeProtocol, errors.New("DATA before response HEADERS"))
+		}
 		cc.logf("protocol error: received DATA before a HEADERS frame")
 		rl.endStreamError(cs, StreamError{
 			StreamID: f.StreamID,
@@ -3008,6 +3035,9 @@ func (rl *clientConnReadLoop) processWindowUpdate(f *WindowUpdateFrame) error {
 		fl = &cs.flow
 	}
 	if !fl.add(int32(f.Increment)) {
+		if cc.t.ChromeBehavior && cs == nil {
+			return ConnectionError(ErrCodeProtocol)
+		}
 		return ConnectionError(ErrCodeFlowControl)
 	}
 	cc.cond.Broadcast()
@@ -3089,6 +3119,8 @@ func (rl *clientConnReadLoop) processPing(f *PingFrame) error {
 		if c, ok := cc.pings[f.Data]; ok {
 			close(c)
 			delete(cc.pings, f.Data)
+		} else if cc.t.ChromeBehavior {
+			return ConnectionError(ErrCodeProtocol)
 		}
 
 		return nil

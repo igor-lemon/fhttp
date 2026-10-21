@@ -80,7 +80,7 @@ func (cc *ClientConn) closeBody(cs *clientStream) {
 	}
 	cc.wmu.Lock()
 	defer cc.wmu.Unlock()
-	if !ended {
+	if !ended && cs.resetErr == nil && !cc.closed {
 		cc.fr.WriteRSTStream(cs.ID, ErrCodeCancel)
 		cs.didReset = true
 	}
