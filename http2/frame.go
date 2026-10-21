@@ -264,9 +264,10 @@ type Frame interface {
 
 // A Framer reads and writes Frames.
 type Framer struct {
-	r         io.Reader
-	lastFrame Frame
-	errDetail error
+	r            io.Reader
+	lastFrame    Frame
+	lastReadType FrameType
+	errDetail    error
 
 	// lastHeaderStream is non-zero if the last frame was an
 	// unfinished HEADERS/PUSH_PROMISE/CONTINUATION.
@@ -495,6 +496,7 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if err != nil {
 		return nil, err
 	}
+	fr.lastReadType = fh.Type
 	if fh.Length > fr.maxReadSize {
 		return nil, ErrFrameTooLarge
 	}
