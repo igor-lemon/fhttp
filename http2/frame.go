@@ -308,6 +308,10 @@ type Framer struct {
 	// and return the meta frame instead.
 	ReadMetaHeaders *hpack.Decoder
 
+	// AllowHeaderHuffmanExpansion keeps the encoded literal bound while allowing
+	// the maximum HPACK Huffman expansion before applying the field-list budget.
+	AllowHeaderHuffmanExpansion bool
+
 	// MaxHeaderListSize is the http2 MAX_HEADER_LIST_SIZE.
 	// It's used only if ReadMetaHeaders is set; 0 means a sane default
 	// (currently 16MB)
@@ -1586,6 +1590,15 @@ func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
 	hdec := fr.ReadMetaHeaders
 	hdec.SetEmitEnabled(true)
 	hdec.SetMaxStringLength(fr.maxHeaderStringLen())
+	if fr.AllowHeaderHuffmanExpansion {
+		// HPACK's shortest Huffman code is five bits. The encoded literal
+		// remains bounded; oversized decoded fields truncate this stream's
+		// field list while the decoder retains its connection state.
+		n := fr.maxHeaderStringLen()
+		if n > 0 && n <= int(^uint(0)>>1)/2 {
+			hdec.SetMaxDecodedStringLength(n + n*3/5 + 1)
+		}
+	}
 	hdec.SetEmitFunc(func(hf hpack.HeaderField) {
 		if VerboseLogs && fr.logReads {
 			fr.debugReadLoggerf("http2: decoded hpack field %+v", hf)

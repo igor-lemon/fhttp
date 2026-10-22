@@ -51,6 +51,11 @@ type Response struct {
 	// Keys in the map are canonicalized (see CanonicalHeaderKey).
 	Header Header
 
+	// FramingHeader retains original HTTP/1 transfer/trailer field values in
+	// Chrome mode. Header keeps the Go dechunked-body contract; browser-facing
+	// callers may expose these original declarations without exposing trailers.
+	FramingHeader Header
+
 	// Body represents the response body.
 	//
 	// The response body is streamed on demand as the Body field
@@ -153,6 +158,10 @@ func (r *Response) Location() (*url.URL, error) {
 // After that call, clients can inspect resp.Trailer to find Key/value
 // pairs included in the response trailer.
 func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
+	return readResponse(r, req, false)
+}
+
+func readResponse(r *bufio.Reader, req *Request, chrome bool) (*Response, error) {
 	tp := textproto.NewReader(r)
 	resp := &Response{
 		Request: req,
@@ -176,6 +185,12 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 	if i := strings.IndexByte(resp.Status, ' '); i != -1 {
 		statusCode = resp.Status[:i]
 	}
+	// Chrome's response parser defaults a missing numeric status to 200.
+	// Keep this compatibility rule out of the ordinary ReadResponse parser;
+	// header syntax and message framing retain their existing validation.
+	if chrome && (len(statusCode) == 0 || statusCode[0] < '0' || statusCode[0] > '9') {
+		statusCode, resp.Status = "200", "200"
+	}
 	if len(statusCode) != 3 {
 		return nil, badStringError("malformed HTTP status code", statusCode)
 	}
@@ -197,6 +212,16 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 		return nil, err
 	}
 	resp.Header = Header(mimeHeader)
+	if chrome {
+		for _, name := range []string{"Transfer-Encoding", "Trailer"} {
+			if values := resp.Header[name]; len(values) > 0 {
+				if resp.FramingHeader == nil {
+					resp.FramingHeader = make(Header)
+				}
+				resp.FramingHeader[name] = append([]string(nil), values...)
+			}
+		}
+	}
 
 	fixPragmaCacheControl(resp.Header)
 
