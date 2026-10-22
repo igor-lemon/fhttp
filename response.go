@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/igor-lemon/utls/behavior"
 	"io"
 	"net/textproto"
 	"net/url"
@@ -162,6 +163,9 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 }
 
 func readResponse(r *bufio.Reader, req *Request, chrome bool) (*Response, error) {
+	return readResponsePolicy(r, req, behavior.Resolve(nil, chrome))
+}
+func readResponsePolicy(r *bufio.Reader, req *Request, policy behavior.Policy) (*Response, error) {
 	tp := textproto.NewReader(r)
 	resp := &Response{
 		Request: req,
@@ -188,8 +192,9 @@ func readResponse(r *bufio.Reader, req *Request, chrome bool) (*Response, error)
 	// Chrome's response parser defaults a missing numeric status to 200.
 	// Keep this compatibility rule out of the ordinary ReadResponse parser;
 	// header syntax and message framing retain their existing validation.
-	if chrome && (len(statusCode) == 0 || statusCode[0] < '0' || statusCode[0] > '9') {
-		statusCode, resp.Status = "200", "200"
+	if policy.Has("h1.missing_status") && (len(statusCode) == 0 || statusCode[0] < '0' || statusCode[0] > '9') {
+		statusCode = strconv.Itoa(policy.Int("h1.missing_status"))
+		resp.Status = statusCode
 	}
 	if len(statusCode) != 3 {
 		return nil, badStringError("malformed HTTP status code", statusCode)
@@ -212,7 +217,7 @@ func readResponse(r *bufio.Reader, req *Request, chrome bool) (*Response, error)
 		return nil, err
 	}
 	resp.Header = Header(mimeHeader)
-	if chrome {
+	if policy.Flag("h1.preserve_framing_fields") {
 		for _, name := range []string{"Transfer-Encoding", "Trailer"} {
 			if values := resp.Header[name]; len(values) > 0 {
 				if resp.FramingHeader == nil {

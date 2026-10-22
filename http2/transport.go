@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"github.com/igor-lemon/utls/behavior"
 	"io"
 	"io/ioutil"
 	"log"
@@ -20,6 +21,7 @@ import (
 	mathrand "math/rand"
 	"net"
 	"net/textproto"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,7 +61,8 @@ const (
 // for concurrent use by multiple goroutines.
 type Transport struct {
 	// ChromeBehavior selects measured Chromium edge-response policies.
-	ChromeBehavior bool
+	ChromeBehavior bool // Deprecated compatibility input.
+	Behavior       behavior.Policy
 
 	// AllowHTTP, if true, permits HTTP/2 requests using the insecure,
 	// plain-text "http" scheme. Note that this does not enable h2c support.
@@ -917,7 +920,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	cc.bw = bufio.NewWriter(stickyErrWriter{&cc.werr, c})
 	cc.br = bufio.NewReader(c)
 	cc.fr = NewFramer(cc.bw, cc.br)
-	if t.ChromeBehavior {
+	if t.policy().Flag("h2.enforce_advertised_frame_limit") {
 		maxRead := uint32(initialMaxFrameSize)
 		if advertised, ok := t.Settings[SettingMaxFrameSize]; ok {
 			maxRead = advertised
@@ -934,7 +937,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	}
 
 	cc.fr.MaxHeaderListSize = t.maxHeaderListSize()
-	cc.fr.AllowHeaderHuffmanExpansion = t.ChromeBehavior
+	cc.fr.AllowHeaderHuffmanExpansion = t.policy().Flag("h2.allow_huffman_expansion")
 
 	cc.henc = t.newEncoder(&cc.hbuf)
 	// The encoder starts at the HPACK protocol-default dynamic table size
@@ -2325,8 +2328,8 @@ func (rl *clientConnReadLoop) run() error {
 			cc.vlogf("http2: Transport readFrame error on conn %p: (%T) %v", cc, err, err)
 		}
 		if se, ok := err.(StreamError); ok {
-			if cc.t.ChromeBehavior && cc.fr.lastReadType == FrameWindowUpdate && se.Code == ErrCodeProtocol {
-				se.Code = ErrCodeFlowControl
+			if cc.t.policy().Has("h2.zero_window_stream_error") && cc.fr.lastReadType == FrameWindowUpdate && se.Code == ErrCodeProtocol {
+				se.Code = ErrCode(cc.t.policy().Uint("h2.zero_window_stream_error"))
 			}
 			if cs := cc.streamByID(se.StreamID, false); cs != nil {
 				cs.cc.writeStreamReset(cs.ID, se.Code, err)
@@ -2486,7 +2489,7 @@ func (rl *clientConnReadLoop) handleResponse(cs *clientStream, f *MetaHeadersFra
 		case "connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade":
 			// Chromium's legacy response parser tolerates Connection/Keep-Alive.
 			// Generic mode keeps RFC9113 8.2.2 validation;Chrome still rejects TE.
-			if !(rl.cc.t.ChromeBehavior && (hf.Name == "connection" || hf.Name == "keep-alive")) {
+			if !(slices.Contains(rl.cc.t.policy().Strings("h2.tolerated_response_fields"), hf.Name)) {
 				return nil, errors.New("http2: connection-specific response field " + hf.Name)
 			}
 		}
@@ -2792,7 +2795,7 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) error {
 		cs.gotEndStream = true
 	}
 	if !cs.firstByte {
-		if cc.t.ChromeBehavior {
+		if cc.t.policy().Flag("h2.reset_data_before_headers") {
 			cs.cc.writeStreamReset(cs.ID, ErrCodeProtocol, errors.New("DATA before response HEADERS"))
 		}
 		cc.logf("protocol error: received DATA before a HEADERS frame")
@@ -3036,8 +3039,8 @@ func (rl *clientConnReadLoop) processWindowUpdate(f *WindowUpdateFrame) error {
 		fl = &cs.flow
 	}
 	if !fl.add(int32(f.Increment)) {
-		if cc.t.ChromeBehavior && cs == nil {
-			return ConnectionError(ErrCodeProtocol)
+		if cc.t.policy().Has("h2.connection_window_overflow_error") && cs == nil {
+			return ConnectionError(cc.t.policy().Uint("h2.connection_window_overflow_error"))
 		}
 		return ConnectionError(ErrCodeFlowControl)
 	}
@@ -3120,7 +3123,7 @@ func (rl *clientConnReadLoop) processPing(f *PingFrame) error {
 		if c, ok := cc.pings[f.Data]; ok {
 			close(c)
 			delete(cc.pings, f.Data)
-		} else if cc.t.ChromeBehavior {
+		} else if cc.t.policy().Flag("h2.reject_unsolicited_ping_ack") {
 			return ConnectionError(ErrCodeProtocol)
 		}
 
@@ -3445,3 +3448,5 @@ func traceFirstResponseByte(trace *httptrace.ClientTrace) {
 		trace.GotFirstResponseByte()
 	}
 }
+
+func (t *Transport) policy() behavior.Policy { return behavior.Resolve(t.Behavior, t.ChromeBehavior) }

@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/igor-lemon/fhttp/http2/hpack"
 )
@@ -255,6 +256,9 @@ func (cc *ClientConn) takeALPS(data []byte) alpsRefusal {
 // what Chrome would of a setting it refuses, nothing of one it takes. cc.mu
 // must be held.
 func (cc *ClientConn) alpsSetting(s Setting) alpsSettingError {
+	if p := cc.t.policy(); p.Has("h2.alps_settings") && !slices.Contains(p.Numbers("h2.alps_settings"), uint64(s.ID)) {
+		return ""
+	}
 	switch s.ID {
 	case SettingHeaderTableSize:
 		cc.setHeaderTableSize(s.Val)
