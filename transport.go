@@ -2287,7 +2287,7 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 
 	continueCh := rc.continueCh
 	for {
-		resp, err = readResponse(pc.br, rc.req, pc.t.TLSClientConfig != nil && pc.t.TLSClientConfig.ChromeBehavior)
+		resp, err = readResponsePolicy(pc.br, rc.req, pc.t.TLSClientConfig.Policy())
 		if err != nil {
 			return
 		}
