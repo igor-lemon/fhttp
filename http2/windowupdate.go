@@ -5,6 +5,7 @@
 package http2
 
 import (
+	"github.com/igor-lemon/utls/behavior"
 	"io"
 	"time"
 )
@@ -31,7 +32,7 @@ var timeNow = time.Now
 // and is what to tell the peer of, 0 for nothing yet. Requires cc.mu.
 func (cc *ClientConn) freedOfConn(n int32, now time.Time) int32 {
 	cc.freed += n
-	if int64(cc.freed) <= (int64(cc.connFlow)+initialWindowSize)/2 && now.Sub(cc.toldAt) <= cc.t.WindowUpdateDelay {
+	if int64(cc.freed) <= (int64(cc.connFlow)+initialWindowSize)/cc.windowDenominator() && now.Sub(cc.toldAt) <= cc.t.WindowUpdateDelay {
 		return 0
 	}
 	add := cc.freed
@@ -48,7 +49,7 @@ func (cc *ClientConn) freedOfStream(cs *clientStream, n int32, now time.Time) in
 		return 0
 	}
 	cs.freed += n
-	if int64(cs.freed) <= int64(cc.streamFlow)/2 && now.Sub(cs.toldAt) <= cc.t.WindowUpdateDelay {
+	if int64(cs.freed) <= int64(cc.streamFlow)/cc.windowDenominator() && now.Sub(cs.toldAt) <= cc.t.WindowUpdateDelay {
 		return 0
 	}
 	add := cs.freed
@@ -106,4 +107,11 @@ func (cc *ClientConn) writeWindowUpdates(cs *clientStream, connAdd, streamAdd in
 		cc.fr.WriteWindowUpdate(cs.ID, uint32(streamAdd))
 	}
 	cc.bw.Flush()
+}
+
+func (cc *ClientConn) windowDenominator() int64 {
+	if n := cc.t.policy().Uint("h2.window_update_denominator"); n > 0 {
+		return int64(n)
+	}
+	return int64(behavior.Legacy().Uint("h2.window_update_denominator"))
 }
