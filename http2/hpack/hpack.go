@@ -80,8 +80,9 @@ type Decoder struct {
 	dynTab dynamicTable
 	emit   func(f HeaderField)
 
-	emitEnabled bool // whether calls to emit are enabled
-	maxStrLen   int  // 0 means unlimited
+	emitEnabled      bool // whether calls to emit are enabled
+	maxStrLen        int  // 0 means unlimited
+	maxDecodedStrLen int  // independently bounded Huffman output
 
 	// buf is the unparsed buffer. It's only written to
 	// saveBuf if it was truncated in the middle of a header
@@ -121,7 +122,14 @@ var ErrStringLength = errors.New("hpack: string too long")
 // A value of 0 means unlimited and is the default from NewDecoder.
 func (d *Decoder) SetMaxStringLength(n int) {
 	d.maxStrLen = n
+	d.maxDecodedStrLen = n
 }
+
+// SetMaxDecodedStringLength changes only the decoded-string bound. The encoded
+// string and incomplete-input bounds set by SetMaxStringLength remain in force.
+// This permits a bounded Huffman expansion before the field-list budget is
+// applied, without accepting an oversized literal on the wire.
+func (d *Decoder) SetMaxDecodedStringLength(n int) { d.maxDecodedStrLen = n }
 
 // SetEmitFunc changes the callback used when new header fields
 // are decoded.
@@ -384,8 +392,8 @@ func (d *Decoder) parseFieldLiteral(n uint8, it indexType) error {
 }
 
 func (d *Decoder) callEmit(hf HeaderField) error {
-	if d.maxStrLen != 0 {
-		if len(hf.Name) > d.maxStrLen || len(hf.Value) > d.maxStrLen {
+	if d.maxDecodedStrLen != 0 {
+		if len(hf.Name) > d.maxDecodedStrLen || len(hf.Value) > d.maxDecodedStrLen {
 			return ErrStringLength
 		}
 	}
@@ -493,7 +501,7 @@ func (d *Decoder) readString(p []byte, wantStr bool) (s string, remain []byte, e
 		buf := bufPool.Get().(*bytes.Buffer)
 		buf.Reset() // don't trust others
 		defer bufPool.Put(buf)
-		if err := huffmanDecode(buf, d.maxStrLen, p[:strLen]); err != nil {
+		if err := huffmanDecode(buf, d.maxDecodedStrLen, p[:strLen]); err != nil {
 			buf.Reset()
 			return "", nil, err
 		}

@@ -934,6 +934,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	}
 
 	cc.fr.MaxHeaderListSize = t.maxHeaderListSize()
+	cc.fr.AllowHeaderHuffmanExpansion = t.ChromeBehavior
 
 	cc.henc = t.newEncoder(&cc.hbuf)
 	// The encoder starts at the HPACK protocol-default dynamic table size

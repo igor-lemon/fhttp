@@ -168,8 +168,21 @@ func refererForURL(lastReq, newReq *url.URL) string {
 // didTimeout is non-nil only if err != nil.
 func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {
 	if c.Jar != nil {
-		for _, cookie := range c.Jar.Cookies(req.URL) {
-			req.AddCookie(cookie)
+		raw, used := "", false
+		if jar, ok := c.Jar.(interface{ RawCookieHeader(*url.URL) (string, bool) }); ok {
+			raw, used = jar.RawCookieHeader(req.URL)
+		}
+		if used {
+			if raw != "" {
+				if before := req.Header.Get("Cookie"); before != "" {
+					raw = before + "; " + raw
+				}
+				req.Header.Set("Cookie", raw)
+			}
+		} else {
+			for _, cookie := range c.Jar.Cookies(req.URL) {
+				req.AddCookie(cookie)
+			}
 		}
 	}
 	resp, didTimeout, err = send(req, c.transport(), deadline)
@@ -177,8 +190,14 @@ func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTime
 		return nil, didTimeout, err
 	}
 	if c.Jar != nil && keepsCookies(req, resp) {
-		if rc := resp.Cookies(); len(rc) > 0 {
-			c.Jar.SetCookies(req.URL, rc)
+		used := false
+		if jar, ok := c.Jar.(interface{ RawSetCookieHeaders(*url.URL, Header) bool }); ok {
+			used = jar.RawSetCookieHeaders(req.URL, resp.Header)
+		}
+		if !used {
+			if rc := resp.Cookies(); len(rc) > 0 {
+				c.Jar.SetCookies(req.URL, rc)
+			}
 		}
 	}
 	return resp, nil, nil
