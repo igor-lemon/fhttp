@@ -2218,6 +2218,10 @@ func (cc *ClientConn) forgetStreamLocked(cs *clientStream) {
 		cc.idleTimer.Reset(cc.idleTimeout)
 		cc.lastIdle = time.Now()
 	}
+	if len(cc.streams) == 0 && cc.goAway != nil && cc.t.policy().Flag("h2.close_on_goaway") {
+		// The last stream of a session going away: closeIfIdle takes cc.mu.
+		go cc.closeIfIdle()
+	}
 	close(cs.done)
 	// Wake up checkResetOrDone via clientStream.awaitFlowControl and
 	// wake up RoundTrip if there is a pending request.
@@ -2924,6 +2928,13 @@ func (rl *clientConnReadLoop) processGoAway(f *GoAwayFrame) error {
 		cc.vlogf("transport got GOAWAY with error code = %v", f.ErrCode)
 	}
 	cc.setGoAway(f)
+	if cc.t.policy().Flag("h2.close_on_goaway") {
+		// A session going away is closed the moment it has no stream left,
+		// as Chrome's SpdySession closes it (MaybeFinishGoingAway), with
+		// no GOAWAY of its own; forgetStreamLocked closes it when its last
+		// stream goes.
+		cc.closeIfIdle()
+	}
 
 	return nil
 }

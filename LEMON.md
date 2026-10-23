@@ -209,3 +209,21 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   `http2/dialcontext_test.go`; 15 mutants, all killed but one equivalent
   (the dial said done before it is forgotten: a request that dials again then
   finds the finished dial, and goes round until it is forgotten).
+
+- HTTP/1: `Transport.IdleConnReapOnRequest`. With it `IdleConnTimeout` arms no
+  timer; an idle connection older than it is closed when the Transport next
+  looks for a connection, for any host (`reapIdleConnsLocked` in
+  `queueForIdleConn`), or when `ReapIdleConns` is called, as Chromium's
+  socket pool cleans up its idle sockets in RequestSocket
+  (`CleanupIdleSockets`) and never by itself. Clone keeps it. Unset, the
+  timer as before. Tests in `idlereap_test.go` (no timer, the next request to
+  another host reaps, a young one reused, an old one to the same host
+  replaced, no timeout no reaping, Clone); three mutants, all killed.
+- HTTP/2: `"h2.close_on_goaway"`. A connection a GOAWAY leaves no stream is
+  closed at once (`processGoAway`), and one whose last stream ends after a
+  GOAWAY when it ends (`forgetStreamLocked`, through `closeIfIdle`), with no
+  GOAWAY of the client's, as Chrome's SpdySession::MaybeFinishGoingAway.
+  Before, it was marked dead and kept until its server closed it. Tests in
+  `http2/goaway_close_test.go` (after the answer, before it, a cancelled
+  stream, off, absent, and a session never told GOAWAY left open); each of
+  the two hooks, taken out, fails its cases.
