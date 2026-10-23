@@ -271,3 +271,25 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   each `io.Copy` (bytes.Reader.WriteTo), a data race when two such answers
   were read at once. `TestAnAnswerWithoutABodyIsReadByManyAtOnce` fails under
   -race with the old one.
+- An answer let go of unread, as Chrome's network stack lets go of one it
+  moves on from (`drain.go`): `DrainBody(ctx, r, limit, timeout, grace)`
+  reads the body apart from its request (HttpResponseBodyDrainer: at most
+  `limit` within `timeout`; at once when the rest is all in the buffer; given
+  no time, nothing more is waited for), keeps an HTTP/1.1 connection whose
+  body ended and closes any other, an HTTP/2 stream that did not end reset;
+  it returns once the body is done or `grace` is over. `AwaitBody(ctx, r,
+  timeout, grace)` returns at once and waits for the body's first bytes
+  (Chrome's preflight loader stops at its first byte), however long when
+  `timeout` is not above zero, then reads the rest when it came with them or
+  within `grace`, else lets go. `ctx` ending lets go of either at once, and
+  each returns a channel closed once the body is done with (its connection
+  back or closed). A body's `Detach` (HTTP/1.1 `bodyEOFSignal`, an
+  `atomic.Bool`: Close holds the body's lock while it waits for the read
+  loop; HTTP/2 `transportResponseBody`, under cc.mu) makes it its request's
+  no more: the read loop, and the HTTP/2 stream's `awaitRequestCancel`, pass
+  over the request's end once it is detached.
+  `internal.EndsInBuffer` says whether a chunked body's rest, its last chunk
+  and trailer included, is all in the reader's buffer within a limit.
+  Measured on Chrome 155.0.8059.85 (tls-forge's review bench, 2026-10-23,
+  `lg-*`). Tests in `drain_test.go`, `drain_internal_test.go`,
+  `http2/drainbody_test.go`, `internal/chunked_buffer_test.go`.
