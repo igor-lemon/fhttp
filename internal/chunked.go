@@ -253,3 +253,62 @@ func parseHexUint(v []byte) (n uint64, err error) {
 	}
 	return
 }
+
+// EndsInBuffer says whether the rest of the chunked body r reads, through its
+// last chunk and the trailer after it (which the http package reads from the
+// same buffer), is all in r's buffer, with no more than limit bytes of data:
+// reading it to its end waits for nothing. A body that does not read as
+// chunked encoding says no; its reader will say why.
+func EndsInBuffer(r io.Reader, limit uint64) bool {
+	cr, ok := r.(*chunkedReader)
+	if !ok || cr.err != nil && cr.err != io.EOF {
+		return false
+	}
+	buf, _ := cr.r.Peek(cr.r.Buffered())
+	if cr.err == nil {
+		var data uint64
+		n, check := cr.n, cr.checkEnd
+		for {
+			if n > 0 {
+				if uint64(len(buf)) < n {
+					return false
+				}
+				data, buf, check = data+n, buf[n:], true
+			}
+			if data > limit {
+				return false
+			}
+			if check {
+				if len(buf) < 2 || string(buf[:2]) != "\r\n" {
+					return false
+				}
+				buf, check = buf[2:], false
+			}
+			i := bytes.IndexByte(buf, '\n')
+			if i < 0 || i+1 >= maxLineLength {
+				return false
+			}
+			// removeChunkExtension never fails: it strips whatever follows.
+			line, _ := removeChunkExtension(trimTrailingWhitespace(buf[:i+1]))
+			var err error
+			if n, err = parseHexUint(line); err != nil {
+				return false
+			}
+			buf = buf[i+1:]
+			if n == 0 {
+				break
+			}
+		}
+	}
+	// The trailer, to its empty line.
+	for {
+		i := bytes.IndexByte(buf, '\n')
+		if i < 0 {
+			return false
+		}
+		if len(bytes.TrimRight(buf[:i+1], "\r\n")) == 0 {
+			return true
+		}
+		buf = buf[i+1:]
+	}
+}
