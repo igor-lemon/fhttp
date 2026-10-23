@@ -417,8 +417,10 @@ type ClientConn struct {
 	pings                 map[[8]byte]chan struct{} // in flight ping data to notification channel
 
 	// readLoop goroutine fields:
-	readerDone chan struct{} // closed on error
-	readerErr  error         // set before readerDone is closed
+	readLoopReady uint32        // atomic; preface/ALPS construction succeeded
+	readLoopOnce  sync.Once     // owns the single read-loop launch
+	readerDone    chan struct{} // closed on error
+	readerErr     error         // set before readerDone is closed
 
 	reused    uint32 // whether conn is being reused; atomic
 	singleUse bool   // whether being used for a single http.Request
@@ -1016,9 +1018,21 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 		}
 	}
 
-	go cc.readLoop()
-
+	atomic.StoreUint32(&cc.readLoopReady, 1)
+	if t.policy().Text("h2.read_loop_start") != "first-headers" {
+		cc.startReadLoop()
+	}
 	return cc, nil
+}
+
+// startReadLoop permits initial request header emission to precede peer input
+// when selected by JSON. Explicit control operations and blocked streams may
+// need peer input before request headers; all paths share one reader launch.
+func (cc *ClientConn) startReadLoop() {
+	if atomic.LoadUint32(&cc.readLoopReady) == 0 {
+		return
+	} // constructor failure owns no reader
+	cc.readLoopOnce.Do(func() { go cc.readLoop() })
 }
 
 func (cc *ClientConn) healthCheck() {
@@ -1149,12 +1163,14 @@ func (cc *ClientConn) closeIfIdle() {
 		cc.vlogf("http2: Transport closing idle conn %p (forSingleUse=%v, maxStream=%v)", cc, cc.singleUse, nextID-2)
 	}
 	cc.tconn.Close()
+	cc.startReadLoop()
 }
 
 var shutdownEnterWaitStateHook = func() {}
 
 // Shutdown gracefully close the client connection, waiting for running streams to complete.
 func (cc *ClientConn) Shutdown(ctx context.Context) error {
+	cc.startReadLoop()
 	if err := cc.sendGoAway(); err != nil {
 		return err
 	}
@@ -1217,6 +1233,7 @@ func (cc *ClientConn) sendGoAway() error {
 // closes the client connection immediately. In-flight requests are interrupted.
 // err is sent to streams.
 func (cc *ClientConn) closeForError(err error) error {
+	cc.startReadLoop()
 	cc.mu.Lock()
 	defer cc.cond.Broadcast()
 	defer cc.mu.Unlock()
@@ -1389,6 +1406,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	cc.wmu.Unlock()
 	traceWroteHeaders(cs.trace)
 	cc.mu.Unlock()
+	cc.startReadLoop()
 
 	if werr != nil {
 		if hasBody {
@@ -1546,6 +1564,7 @@ func (cc *ClientConn) awaitOpenSlotForRequest(req *http.Request) error {
 			}()
 		}
 		cc.pendingRequests++
+		cc.startReadLoop() // e.g. ALPS advertised zero slots; peer SETTINGS must unblock us
 		cc.cond.Wait()
 		cc.pendingRequests--
 		if waitingForConnErr != nil {
@@ -2999,6 +3018,7 @@ func (cc *ClientConn) applySetting(s Setting) error {
 		cc.maxFrameSize = s.Val
 	case SettingMaxConcurrentStreams:
 		cc.maxConcurrentStreams = s.Val
+		cc.cond.Broadcast() // wake requests waiting on ALPS/peer stream limits
 	case SettingMaxHeaderListSize:
 		cc.peerMaxHeaderListSize = uint64(s.Val)
 	case SettingInitialWindowSize:
@@ -3074,6 +3094,7 @@ func (rl *clientConnReadLoop) processResetStream(f *RSTStreamFrame) error {
 
 // Ping sends a PING frame to the server and waits for the ack.
 func (cc *ClientConn) Ping(ctx context.Context) error {
+	cc.startReadLoop()
 	c := make(chan struct{})
 	// Generate a random payload
 	var p [8]byte
