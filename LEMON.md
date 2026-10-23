@@ -256,3 +256,18 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   check" agree), the second look keeping the first's time (the silence
   condition gives the same verdict), and the PING's guard against a failed
   HEADERS write (bufio refuses the PING anyway).
+- HTTP/2: the stream a request's HEADERS depend on, as Chrome's
+  Http2PriorityDependencies chooses it (`http2/dependency.go`;
+  `"h2.priority_dependency": "nearest-weight"`): the open streams kept in
+  lists by weight in the order opened; a new one depends on the last of the
+  list of the lowest weight not below its own, or none, and leaves its list
+  in `forgetStreamLocked`. A priority with no PRIORITY flag joins nothing;
+  "root" or no policy leaves the priority as given. Measured on Chrome
+  155.0.8059.85 (tls-forge's review bench, 2026-10-23: four `fetch()`es,
+  and twelve streams of three weights, one ending midway). Tests in
+  `http2/dependency_test.go`; 13 mutants, all killed.
+- `noBody`, the body of every answer that has none, is x/net's stateless
+  `noBodyReader`: the shared `NopCloser(bytes.NewReader(nil))` was written by
+  each `io.Copy` (bytes.Reader.WriteTo), a data race when two such answers
+  were read at once. `TestAnAnswerWithoutABodyIsReadByManyAtOnce` fails under
+  -race with the old one.
