@@ -441,6 +441,20 @@ type ClientConn struct {
 	// began. Guarded by mu.
 	freed  int32
 	toldAt time.Time
+
+	// The connection's own PING (prefaceping.go): when it began, when it last
+	// read anything (nanoseconds after born; atomic), and how long it waits
+	// before it pings and for an answer, 0 for never. Guarded by pingMu,
+	// which no other lock is taken under: the next PING's count, whether one
+	// is unanswered and whether a check of one is pending.
+	born             time.Time
+	lastRead         int64
+	pingIdle         time.Duration
+	pingHung         time.Duration
+	pingMu           sync.Mutex
+	nextPingID       uint64
+	pingInFlight     bool
+	pingCheckPending bool
 }
 
 // clientStream is the state for a single HTTP/2 stream. One of these
@@ -665,8 +679,9 @@ func (t *Transport) RoundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 	}
 
 	addr := authorityAddr(req.URL.Scheme, req.URL.Host)
+	pinged := 0 // times req went again after its connection was given up for its PING
 	for retry := 0; ; retry++ {
-		cc, err := t.getClientConn(req, addr, opt.OnlyCachedConn && retry == 0)
+		cc, err := t.getClientConn(req, addr, opt.OnlyCachedConn && retry == 0 && pinged == 0)
 		if err != nil {
 			t.vlogf("http2: Transport failed to get client conn for %s: %v", addr, err)
 
@@ -675,6 +690,17 @@ func (t *Transport) RoundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 		reused := !atomic.CompareAndSwapUint32(&cc.reused, 0, 1)
 		traceGotConn(req, cc, reused)
 		res, gotErrAfterReqBodyWrite, err := cc.roundTrip(req)
+		if err == errPrefacePingFailed && pinged < t.policy().Int("h2.preface_ping_failed_retries") {
+			// It goes again at once, on another connection, as Chrome
+			// sends a request again after ERR_HTTP2_PING_FAILED: not one of
+			// the transport's own tries, which wait longer each time.
+			if req, err = rewound(req, err, gotErrAfterReqBodyWrite); err != nil {
+				return nil, err
+			}
+			pinged++
+			retry--
+			continue
+		}
 		if err != nil && retry <= 6 {
 			if req, err = shouldRetryRequest(req, err, gotErrAfterReqBodyWrite); err == nil {
 				// After the first retry, do exponential backoff with 10% jitter.
@@ -734,6 +760,13 @@ func shouldRetryRequest(req *http.Request, err error, afterBodyWrite bool) (*htt
 	if !canRetryError(err) {
 		return nil, err
 	}
+
+	return rewound(req, err, afterBodyWrite)
+}
+
+// rewound is req to send again after err: req itself when its body can go
+// again, a copy with the body GetBody gives, or an error.
+func rewound(req *http.Request, err error, afterBodyWrite bool) (*http.Request, error) {
 	// If the Body is nil (or http.NoBody), it's safe to reuse
 	// this request and its Body.
 	if req.Body == nil || req.Body == http.NoBody {
@@ -920,7 +953,15 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	// TODO: adjust this writer size to account for frame size +
 	// MTU + crypto/tls record padding.
 	cc.bw = bufio.NewWriter(stickyErrWriter{&cc.werr, c})
-	cc.br = bufio.NewReader(c)
+	cc.born = timeNow()
+	if idle := t.policy().Uint("h2.preface_ping_idle_ms"); idle != 0 {
+		cc.pingIdle = time.Duration(idle) * time.Millisecond
+		cc.pingHung = time.Duration(t.policy().Uint("h2.preface_ping_hung_ms")) * time.Millisecond
+		cc.nextPingID = t.policy().Uint("h2.preface_ping_first_id")
+		cc.br = bufio.NewReader(readStamp{c, cc})
+	} else {
+		cc.br = bufio.NewReader(c)
+	}
 	cc.fr = NewFramer(cc.bw, cc.br)
 	if t.policy().Flag("h2.enforce_advertised_frame_limit") {
 		maxRead := uint32(initialMaxFrameSize)
@@ -1237,6 +1278,14 @@ func (cc *ClientConn) closeForError(err error) error {
 	cc.mu.Lock()
 	defer cc.cond.Broadcast()
 	defer cc.mu.Unlock()
+	cc.failStreamsLocked(err)
+
+	return cc.tconn.Close()
+}
+
+// failStreamsLocked ends every stream with err, which their requests and
+// bodies get, and lets the connection take no more. Requires cc.mu.
+func (cc *ClientConn) failStreamsLocked(err error) {
 	for id, cs := range cc.streams {
 		select {
 		case cs.resc <- resAndError{err: err}:
@@ -1246,8 +1295,6 @@ func (cc *ClientConn) closeForError(err error) error {
 		delete(cc.streams, id)
 	}
 	cc.closed = true
-
-	return cc.tconn.Close()
 }
 
 // Close closes the client connection immediately.
@@ -1630,6 +1677,10 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 	// wouldn't respond to Request.Cancel being readable. That's
 	// rare, but this should probably be in a goroutine.
 	cc.bw.Flush()
+	if cc.werr == nil {
+		// The connection's own PING goes after the HEADERS, as Chrome's.
+		cc.prefacePingLocked()
+	}
 
 	return cc.werr
 }
@@ -1786,6 +1837,9 @@ func (cs *clientStream) writeRequestBody(body io.Reader, bodyCloser io.Closer) (
 			data := remain[:allowed]
 			remain = remain[allowed:]
 			sentEnd = sawEOF && len(remain) == 0 && !hasTrailers
+			// The connection's own PING goes before a DATA frame that
+			// carries any of the body, as Chrome's.
+			cc.prefacePingLocked()
 			err = cc.fr.WriteData(cs.ID, sentEnd, data)
 			if err == nil {
 				// TODO(bradfitz): this flush is for latency, not bandwidth.
@@ -3133,6 +3187,9 @@ func (rl *clientConnReadLoop) processPing(f *PingFrame) error {
 		if c, ok := cc.pings[f.Data]; ok {
 			close(c)
 			delete(cc.pings, f.Data)
+		} else if cc.prefacePingAnswered() {
+			// The connection's own PING, whatever the acknowledgement
+			// says, as Chrome takes it.
 		} else if cc.t.policy().Flag("h2.reject_unsolicited_ping_ack") {
 			return ConnectionError(ErrCodeProtocol)
 		}
