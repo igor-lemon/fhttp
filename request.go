@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/igor-lemon/utls/behavior"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -568,7 +569,7 @@ var errMissingHost = errors.New("http: Request.Write on Request with no Host or 
 // in one write, and a body held in memory in the same write when the two are
 // no more than merge bytes together.
 func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitForContinue func() bool,
-	merge int) (err error) {
+	merge int, policies ...behavior.Policy) (err error) {
 	trace := httptrace.ContextClientTrace(r.Context())
 	if trace != nil && trace.WroteRequest != nil {
 		defer func() {
