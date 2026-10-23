@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"github.com/igor-lemon/utls/behavior"
 	"io"
-	"io/ioutil"
 	"log"
 	"math"
 	mathrand "math/rand"
@@ -455,6 +454,13 @@ type ClientConn struct {
 	nextPingID       uint64
 	pingInFlight     bool
 	pingCheckPending bool
+
+	// The streams a new stream's HEADERS may depend on (dependency.go):
+	// whether they are chosen as Chrome's, and, guarded by mu, the open
+	// streams by weight in the order they were opened, and each one's weight.
+	nearestWeight bool
+	byWeight      map[uint8][]uint32
+	weightOf      map[uint32]uint8
 }
 
 // clientStream is the state for a single HTTP/2 stream. One of these
@@ -953,6 +959,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	// TODO: adjust this writer size to account for frame size +
 	// MTU + crypto/tls record padding.
 	cc.bw = bufio.NewWriter(stickyErrWriter{&cc.werr, c})
+	cc.nearestWeight = t.policy().Text("h2.priority_dependency") == "nearest-weight"
 	cc.born = timeNow()
 	if idle := t.policy().Uint("h2.preface_ping_idle_ms"); idle != 0 {
 		cc.pingIdle = time.Duration(idle) * time.Millisecond
@@ -1449,7 +1456,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 
 	cc.wmu.Lock()
 	endStream := !hasBody && !hasTrailers
-	werr := cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs, cc.headerPriority(req))
+	werr := cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs, cc.dependOnLocked(cs.ID, cc.headerPriority(req)))
 	cc.wmu.Unlock()
 	traceWroteHeaders(cs.trace)
 	cc.mu.Unlock()
@@ -2268,6 +2275,7 @@ func (cc *ClientConn) streamByID(id uint32, andRemove bool) *clientStream {
 func (cc *ClientConn) forgetStreamLocked(cs *clientStream) {
 	cc.lastActive = time.Now()
 	delete(cc.streams, cs.ID)
+	cc.undependLocked(cs.ID)
 	if len(cc.streams) == 0 && cc.idleTimer != nil {
 		cc.idleTimer.Reset(cc.idleTimeout)
 		cc.lastIdle = time.Now()
@@ -3319,7 +3327,15 @@ func (t *Transport) logf(format string, args ...interface{}) {
 	log.Printf(format, args...)
 }
 
-var noBody io.ReadCloser = ioutil.NopCloser(bytes.NewReader(nil))
+// noBody is the body of every answer that has none. It keeps no state, as
+// x/net's: a bytes.Reader shared by answers read at once was written by each
+// read.
+var noBody io.ReadCloser = noBodyReader{}
+
+type noBodyReader struct{}
+
+func (noBodyReader) Close() error             { return nil }
+func (noBodyReader) Read([]byte) (int, error) { return 0, io.EOF }
 
 func strSliceContains(ss []string, s string) bool {
 	for _, v := range ss {

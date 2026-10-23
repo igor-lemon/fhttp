@@ -54,6 +54,7 @@ type seen struct {
 	kind   FrameType
 	stream uint32
 	flags  Flags
+	prio   PriorityParam // a HEADERS frame's
 	ping   [8]byte
 	code   ErrCode
 	last   uint32
@@ -130,6 +131,8 @@ func (p *peer) read() {
 			continue
 		case *PingFrame:
 			s.ping = f.Data
+		case *HeadersFrame:
+			s.prio = f.Priority
 		case *DataFrame:
 			s.data = string(f.Data())
 		case *GoAwayFrame:
