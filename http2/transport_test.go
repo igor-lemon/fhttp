@@ -2150,9 +2150,21 @@ func TestTransportDisableCompression(t *testing.T) {
 	defer res.Body.Close()
 }
 
-// RFC 7540 section 8.1.2.2
+// RFC 9113 section 8.2.2. Content-Length is message framing, not a
+// connection-specific field; fhttp deliberately preserves an explicit value.
 func TestTransportRejectsConnHeaders(t *testing.T) {
+	type received struct {
+		header       http.Header
+		body         string
+		err          error
+		method, path string
+	}
+	seen := make(chan received, 1)
+	var calls int32
 	st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		body, err := io.ReadAll(r.Body)
+		seen <- received{r.Header.Clone(), string(body), err, r.Method, r.URL.Path}
 		var got []string
 		for k := range r.Header {
 			got = append(got, k)
@@ -2168,6 +2180,7 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
 	tests := []struct {
 		key   string
 		value []string
+		body  string
 		want  string
 	}{
 		{
@@ -2233,7 +2246,10 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
 		{
 			key:   "Content-Length",
 			value: []string{"123"},
-			want:  "Accept-Encoding,User-Agent",
+			// An unknown-length reader prevents automatic length generation:
+			// the explicit value must reach the peer exactly once, with its body.
+			body: strings.Repeat("x", 123),
+			want: "Accept-Encoding,Content-Length,User-Agent",
 		},
 		{
 			key:   "Keep-Alive",
@@ -2242,20 +2258,137 @@ func TestTransportRejectsConnHeaders(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		req, _ := http.NewRequest("GET", st.ts.URL, nil)
-		req.Header[tt.key] = tt.value
-		res, err := tr.RoundTrip(req)
-		var got string
-		if err != nil {
-			got = fmt.Sprintf("ERROR: %v", err)
-		} else {
-			got = res.Header.Get("Got-Header")
+	var accepted int32
+	for i, tt := range tests {
+		t.Run(fmt.Sprintf("%s/%d", tt.key, i), func(t *testing.T) {
+			var body io.Reader
+			if tt.body != "" {
+				body = struct{ io.Reader }{strings.NewReader(tt.body)}
+			}
+			req, err := http.NewRequest("GET", st.ts.URL+"/case/"+strconv.Itoa(i), body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header[tt.key] = tt.value
+			original := req.Header.Clone()
+			res, err := tr.RoundTrip(req)
+			var got string
+			if err != nil {
+				got = fmt.Sprintf("ERROR: %v", err)
+			} else {
+				accepted++
+				got = res.Header.Get("Got-Header")
+				io.Copy(io.Discard, res.Body)
+				res.Body.Close()
+				var actual received
+				select {
+				case actual = <-seen:
+				default:
+					t.Fatalf("response status %d without a handler observation", res.StatusCode)
+				}
+				wantHeader := http.Header{
+					"Accept-Encoding": {"gzip, deflate, br"},
+					"User-Agent":      {defaultUserAgent},
+				}
+				if tt.key == "Content-Length" {
+					wantHeader[tt.key] = tt.value
+				}
+				if !reflect.DeepEqual(actual.header, wantHeader) {
+					t.Errorf("headers = %#v; want %#v", actual.header, wantHeader)
+				}
+				if actual.err != nil || actual.body != tt.body || actual.method != "GET" || actual.path != req.URL.Path {
+					t.Errorf("received method=%q path=%q body=%q error=%v; want GET %q body=%q", actual.method, actual.path, actual.body, actual.err, req.URL.Path, tt.body)
+				}
+			}
+			if got != tt.want {
+				t.Errorf("value %q: got %q; want %q", tt.value, got, tt.want)
+			}
+			if !reflect.DeepEqual(req.Header, original) {
+				t.Error("RoundTrip mutated the caller's headers")
+			}
+			if got := atomic.LoadInt32(&calls); got != accepted {
+				t.Errorf("handler calls = %d; want %d (rejected headers must never reach the handler)", got, accepted)
+			}
+		})
+	}
+}
+
+// Explicit framing is a low-level fhttp facility, not a browser script header.
+// Check exact values and complete payloads, including unknown-length readers,
+// so this regression cannot be fixed by dropping Content-Length unconditionally.
+func TestTransportContentLengthHeaders(t *testing.T) {
+	type received struct {
+		header http.Header
+		body   string
+		err    error
+	}
+	seen := make(chan received, 1)
+	st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		seen <- received{r.Header.Clone(), string(body), err}
+	}, optOnlyServer)
+	defer st.Close()
+	tr := &Transport{TLSClientConfig: tlsConfigInsecure}
+	defer tr.CloseIdleConnections()
+	for _, tt := range []struct {
+		name, method, key, value, body, want string
+		unknown                              bool
+	}{
+		{name: "GET absent", method: "GET"},
+		{name: "GET explicit zero", method: "GET", key: "Content-Length", value: "0", want: "0"},
+		{name: "POST generated zero", method: "POST", want: "0"},
+		{name: "PUT generated zero", method: "PUT", want: "0"},
+		{name: "PATCH generated zero", method: "PATCH", want: "0"},
+		{name: "POST generated length", method: "POST", body: "payload", want: "7"},
+		{name: "GET generated length", method: "GET", body: "payload", want: "7"},
+		{name: "unknown length absent", method: "POST", body: "payload", unknown: true},
+		{name: "explicit lower case", method: "POST", key: "content-length", value: "7", body: "payload", want: "7", unknown: true},
+		{name: "explicit canonical", method: "POST", key: "Content-Length", value: "7", body: "payload", want: "7", unknown: true},
+		{name: "explicit mixed case", method: "POST", key: "cOnTeNt-LeNgTh", value: "7", body: "payload", want: "7", unknown: true},
+		{name: "explicit legal leading zeros", method: "POST", key: "content-length", value: "007", body: "payload", want: "007", unknown: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var body io.Reader
+			if tt.body != "" {
+				body = strings.NewReader(tt.body)
+				if tt.unknown {
+					body = struct{ io.Reader }{body}
+				}
+			}
+			req, err := http.NewRequest(tt.method, st.ts.URL, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.key != "" {
+				req.Header[tt.key] = []string{tt.value}
+			}
+			original := req.Header.Clone()
+			res, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, res.Body)
 			res.Body.Close()
-		}
-		if got != tt.want {
-			t.Errorf("For key %q, value %q, got = %q; want %q", tt.key, tt.value, got, tt.want)
-		}
+			var actual received
+			select {
+			case actual = <-seen:
+			default:
+				t.Fatalf("response status %d without a handler observation", res.StatusCode)
+			}
+			want := http.Header{"Accept-Encoding": {"gzip, deflate, br"}, "User-Agent": {defaultUserAgent}}
+			if tt.want != "" {
+				want["Content-Length"] = []string{tt.want}
+			}
+			if !reflect.DeepEqual(actual.header, want) {
+				t.Errorf("headers = %#v; want %#v", actual.header, want)
+			}
+			if actual.err != nil || actual.body != tt.body {
+				t.Errorf("body = %q, error %v; want %q", actual.body, actual.err, tt.body)
+			}
+			if !reflect.DeepEqual(req.Header, original) {
+				t.Error("RoundTrip mutated the caller's headers")
+			}
+		})
 	}
 }
 
