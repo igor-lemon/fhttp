@@ -487,8 +487,10 @@ type clientStream struct {
 	pastHeaders  bool // got first MetaHeadersFrame (actual headers)
 	pastTrailers bool // got optional second MetaHeadersFrame (trailers)
 
-	peerReset     chan struct{} // closed on peer reset
-	readErr       error         // sticky read error; owned by transportResponseBody.Read
+	peerReset chan struct{} // closed on peer reset
+
+	detached      bool  // its body let go of (Detach); guarded by cc.mu
+	readErr       error // sticky read error; owned by transportResponseBody.Read
 	req           *http.Request
 	requestedGzip bool
 	resc          chan resAndError
@@ -544,6 +546,13 @@ func (cs *clientStream) get1xxTraceFunc() func(int, textproto.MIMEHeader) error 
 // etc). If the request is canceled, then cs will be canceled and closed.
 func (cs *clientStream) awaitRequestCancel(req *http.Request) {
 	if err := awaitRequestCancel(req, cs.done); err != nil {
+		cs.cc.mu.Lock()
+		detached := cs.detached
+		cs.cc.mu.Unlock()
+		if detached {
+			// Its body let go of before its request ended: no more its.
+			return
+		}
 		cs.cancelStream()
 		cs.bufPipe.CloseWithError(err)
 	}
@@ -2675,6 +2684,15 @@ func (rl *clientConnReadLoop) processTrailers(cs *clientStream, f *MetaHeadersFr
 // On Close it sends RST_STREAM if EOF wasn't already seen.
 type transportResponseBody struct {
 	cs *clientStream
+}
+
+// Detach makes the body its request's no more: the request's context or
+// Cancel ending no longer resets the stream under it (http.DrainBody).
+func (b transportResponseBody) Detach() {
+	cc := b.cs.cc
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	b.cs.detached = true
 }
 
 func (b transportResponseBody) Read(p []byte) (n int, err error) {

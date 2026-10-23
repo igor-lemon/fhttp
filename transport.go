@@ -2263,26 +2263,45 @@ func (pc *persistConn) readLoop() {
 
 		// Before looping back to the top of this function and peeking on
 		// the bufio.Reader, wait for the caller goroutine to finish
-		// reading the response body. (or for cancellation or death)
-		select {
-		case bodyEOF := <-waitForBodyRead:
-			replaced := pc.t.replaceReqCanceler(rc.cancelKey, nil) // before pc might return to idle pool
-			alive = alive &&
-				bodyEOF &&
-				!pc.sawEOF &&
-				pc.wroteRequest() &&
-				replaced && tryPutIdleConn(trace)
-			if bodyEOF {
-				eofc <- struct{}{}
+		// reading the response body. (or for cancellation or death; a body
+		// let go of, to be drained for the connection's sake, is its
+		// request's no more: see DrainBody)
+		cancelc, ctxDone := rc.req.Cancel, rc.req.Context().Done()
+	waiting:
+		for {
+			select {
+			case bodyEOF := <-waitForBodyRead:
+				replaced := pc.t.replaceReqCanceler(rc.cancelKey, nil) // before pc might return to idle pool
+				alive = alive &&
+					bodyEOF &&
+					!pc.sawEOF &&
+					pc.wroteRequest() &&
+					replaced && tryPutIdleConn(trace)
+				if bodyEOF {
+					eofc <- struct{}{}
+				}
+				break waiting
+			case <-cancelc:
+				if body.isDetached() {
+					// Let go of before its request ended: no more its.
+					cancelc, ctxDone = nil, nil
+					continue
+				}
+				alive = false
+				pc.t.CancelRequest(rc.req)
+				break waiting
+			case <-ctxDone:
+				if body.isDetached() {
+					cancelc, ctxDone = nil, nil
+					continue
+				}
+				alive = false
+				pc.t.cancelRequest(rc.cancelKey, rc.req.Context().Err())
+				break waiting
+			case <-pc.closech:
+				alive = false
+				break waiting
 			}
-		case <-rc.req.Cancel:
-			alive = false
-			pc.t.CancelRequest(rc.req)
-		case <-rc.req.Context().Done():
-			alive = false
-			pc.t.cancelRequest(rc.cancelKey, rc.req.Context().Err())
-		case <-pc.closech:
-			alive = false
 		}
 
 		testHookReadLoopBeforeNextRead()
@@ -2826,6 +2845,9 @@ type bodyEOFSignal struct {
 	rerr         error             // sticky Read error
 	fn           func(error) error // err will be nil on Read io.EOF
 	earlyCloseFn func() error      // optional alt Close func used if io.EOF not seen
+	// detached is whether its body was let go of (Detach, drain.go): no
+	// lock, since the read loop asks while Close holds mu and waits for it.
+	detached atomic.Bool
 }
 
 var errReadOnClosedResBody = errors.New("http: read on closed response body")
