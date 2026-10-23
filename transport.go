@@ -217,6 +217,15 @@ type Transport struct {
 	// Zero means no limit.
 	IdleConnTimeout time.Duration
 
+	// IdleConnReapOnRequest makes IdleConnTimeout close an idle HTTP/1
+	// connection only when the Transport next looks for a connection, to any
+	// host, instead of by a timer: Chromium's socket pool closes its idle
+	// sockets that are too old each time a socket is asked of it
+	// (TransportClientSocketPool::CleanupIdleSockets), and never on its own.
+	// A connection nothing asks for again stays open until its server closes
+	// it.
+	IdleConnReapOnRequest bool
+
 	// ResponseHeaderTimeout, if non-zero, specifies the amount of
 	// time to wait for a server's response headers after fully
 	// writing the request (including its body, if any). This
@@ -341,6 +350,7 @@ func (t *Transport) Clone() *Transport {
 		MaxIdleConnsPerHost:    t.MaxIdleConnsPerHost,
 		MaxConnsPerHost:        t.MaxConnsPerHost,
 		IdleConnTimeout:        t.IdleConnTimeout,
+		IdleConnReapOnRequest:  t.IdleConnReapOnRequest,
 		ResponseHeaderTimeout:  t.ResponseHeaderTimeout,
 		ExpectContinueTimeout:  t.ExpectContinueTimeout,
 		ProxyConnectHeader:     t.ProxyConnectHeader.Clone(),
@@ -1000,7 +1010,7 @@ func (t *Transport) tryPutIdleConn(pconn *persistConn) error {
 	// Set idle timer, but only for HTTP/1 (pconn.alt == nil).
 	// The HTTP/2 implementation manages the idle timer itself
 	// (see idleConnTimeout in h2_bundle.go).
-	if t.IdleConnTimeout > 0 && pconn.alt == nil {
+	if t.IdleConnTimeout > 0 && pconn.alt == nil && !t.IdleConnReapOnRequest {
 		if pconn.idleTimer != nil {
 			pconn.idleTimer.Reset(t.IdleConnTimeout)
 		} else {
@@ -1029,6 +1039,10 @@ func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
 	if w == nil {
 		// Happens in test hook.
 		return false
+	}
+
+	if t.IdleConnReapOnRequest && t.IdleConnTimeout > 0 {
+		t.reapIdleConnsLocked(time.Now().Add(-t.IdleConnTimeout))
 	}
 
 	// If IdleConnTimeout is set, calculate the oldest
@@ -1098,6 +1112,39 @@ func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
 	q.pushBack(w)
 	t.idleConnWait[w.key] = q
 	return false
+}
+
+// ReapIdleConns closes the idle HTTP/1 connections older than IdleConnTimeout
+// when IdleConnReapOnRequest is set, as a request for a connection does. A
+// client of several Transports asks each when it asks any for a connection,
+// as Chromium's one socket pool cleans up the idle sockets of every host.
+func (t *Transport) ReapIdleConns() {
+	if !t.IdleConnReapOnRequest || t.IdleConnTimeout <= 0 {
+		return
+	}
+	t.idleMu.Lock()
+	defer t.idleMu.Unlock()
+	t.reapIdleConnsLocked(time.Now().Add(-t.IdleConnTimeout))
+}
+
+// reapIdleConnsLocked closes every idle HTTP/1 connection that became idle
+// before oldTime, whatever host it is for, as Chromium's socket pool cleans up
+// its idle sockets when a socket is asked of it. t.idleMu must be held.
+func (t *Transport) reapIdleConnsLocked(oldTime time.Time) {
+	if t.idleLRU.ll == nil {
+		return
+	}
+	var old []*persistConn
+	for e := t.idleLRU.ll.Front(); e != nil; e = e.Next() {
+		pconn := e.Value.(*persistConn)
+		if pconn.alt == nil && pconn.idleAt.Round(0).Before(oldTime) {
+			old = append(old, pconn)
+		}
+	}
+	for _, pconn := range old {
+		t.removeIdleConnLocked(pconn)
+		pconn.close(errIdleConnTimeout)
+	}
 }
 
 // removeIdleConn marks pconn as dead.
