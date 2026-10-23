@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/igor-lemon/utls/behavior"
 	"io"
 	"net/textproto"
 	"reflect"
@@ -57,6 +58,8 @@ func (br *byteReader) Read(p []byte) (n int, err error) {
 // sanitizes them without changing the user object and provides methods for
 // writing the respective header, body and trailer in wire format.
 type transferWriter struct {
+	policy           behavior.Policy
+	bodyProvided     bool
 	Method           string
 	Body             io.Reader
 	BodyCloser       io.Closer
@@ -252,24 +255,7 @@ func (t *transferWriter) shouldSendContentLength() bool {
 	if chunked(t.TransferEncoding) {
 		return false
 	}
-	if t.ContentLength > 0 {
-		return true
-	}
-	if t.ContentLength < 0 {
-		return false
-	}
-	// Many servers expect a Content-Length for these methods
-	if t.Method == "POST" || t.Method == "PUT" || t.Method == "PATCH" {
-		return true
-	}
-	if t.ContentLength == 0 && isIdentity(t.TransferEncoding) {
-		if t.Method == "GET" || t.Method == "HEAD" {
-			return false
-		}
-		return true
-	}
-
-	return false
+	return t.policy.SendContentLength(t.Method, t.ContentLength, t.bodyProvided, isIdentity(t.TransferEncoding))
 }
 
 // addHeaders adds transfer headers to an existing header object, replacing any the caller set with the same name.
