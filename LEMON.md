@@ -227,3 +227,32 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   `http2/goaway_close_test.go` (after the answer, before it, a cancelled
   stream, off, absent, and a session never told GOAWAY left open); each of
   the two hooks, taken out, fails its cases.
+- HTTP/2: the connection's own PING, as Chrome's SpdySession sends it
+  (`http2/prefaceping.go`; the `h2.preface_ping_*` policy). A HEADERS block
+  (`writeHeaders`, after its flush) or a DATA frame with any of a body
+  (`writeRequestBody`, before it) to a connection that has read nothing for
+  longer than `h2.preface_ping_idle_ms` goes with a PING in a write of its
+  own, its eight bytes a big-endian count from `h2.preface_ping_first_id`;
+  none while one is unanswered or the check of one pending. `readStamp` on
+  `cc.br` (only with the policy) keeps when the connection last read
+  anything. Any acknowledgement answers it (`processPing`, after
+  `cc.pings`), as Chrome's OnPing. `h2.preface_ping_hung_ms` after it the
+  check gives the connection up when it is unanswered and nothing has been
+  read for that long or since the check before, else looks again that long
+  after the last read; giving up fails the streams first
+  (`failStreamsLocked`, out of `closeForError`), then says GOAWAY
+  (`h2.preface_ping_failed_goaway_code`, `_debug`) under a write deadline of
+  the hung time, so that a write the dead connection holds up gives up, then
+  closes. `RoundTripOpt` sends a request that got `errPrefacePingFailed`
+  again at once, `h2.preface_ping_failed_retries` times at most, through
+  `rewound` (split out of `shouldRetryRequest`), not as one of its own tries
+  (`retry--`), and lets it dial (`OnlyCachedConn` on the first try only).
+  Measured on Chrome 155.0.8059.85 (tls-forge's review bench, 2026-10-23):
+  HEADERS then PING 1, 2; a streamed body's DATA after PING 1; an unanswered
+  PING: GOAWAY PROTOCOL_ERROR "Failed ping." 10.01 s after it, the request
+  again on a new connection. Tests in `http2/prefaceping_test.go`; 32
+  mutants, 28 killed, 4 equivalent: each of CheckPingStatus's two conditions
+  alone (a timer fires after its time, so silence and "nothing since the
+  check" agree), the second look keeping the first's time (the silence
+  condition gives the same verdict), and the PING's guard against a failed
+  HEADERS write (bufio refuses the PING anyway).
