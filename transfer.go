@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/igor-lemon/utls/behavior"
 	"io"
 	"net/textproto"
 	"reflect"
@@ -57,6 +58,8 @@ func (br *byteReader) Read(p []byte) (n int, err error) {
 // sanitizes them without changing the user object and provides methods for
 // writing the respective header, body and trailer in wire format.
 type transferWriter struct {
+	policy           behavior.Policy
+	bodyProvided     bool
 	Method           string
 	Body             io.Reader
 	BodyCloser       io.Closer
@@ -196,10 +199,11 @@ func (t *transferWriter) shouldSendChunkedRequestBody() bool {
 // headers before the pipe is fed data), we need to be careful and bound how
 // long we wait for it. This delay will only affect users if all the following
 // are true:
-//   * the request body blocks
-//   * the content length is not set (or set to -1)
-//   * the method doesn't usually have a body (GET, HEAD, DELETE, ...)
-//   * there is no transfer-encoding=chunked already set.
+//   - the request body blocks
+//   - the content length is not set (or set to -1)
+//   - the method doesn't usually have a body (GET, HEAD, DELETE, ...)
+//   - there is no transfer-encoding=chunked already set.
+//
 // In other words, this delay will not normally affect anybody, and there
 // are workarounds if it does.
 func (t *transferWriter) probeRequestBody() {
@@ -251,24 +255,7 @@ func (t *transferWriter) shouldSendContentLength() bool {
 	if chunked(t.TransferEncoding) {
 		return false
 	}
-	if t.ContentLength > 0 {
-		return true
-	}
-	if t.ContentLength < 0 {
-		return false
-	}
-	// Many servers expect a Content-Length for these methods
-	if t.Method == "POST" || t.Method == "PUT" || t.Method == "PATCH" {
-		return true
-	}
-	if t.ContentLength == 0 && isIdentity(t.TransferEncoding) {
-		if t.Method == "GET" || t.Method == "HEAD" {
-			return false
-		}
-		return true
-	}
-
-	return false
+	return t.policy.SendContentLength(t.Method, t.ContentLength, t.bodyProvided, isIdentity(t.TransferEncoding))
 }
 
 // addHeaders adds transfer headers to an existing header object

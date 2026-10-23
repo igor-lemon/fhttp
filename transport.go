@@ -2401,7 +2401,7 @@ func (pc *persistConn) writeLoop() {
 		case wr := <-pc.writech:
 			startBytesWritten := pc.nwrite
 			err := wr.req.Request.write(pc.bw, pc.isProxy, wr.req.extra, pc.waitForContinue(wr.continueCh),
-				pc.t.MaxMergedHeadAndBody)
+				pc.t.MaxMergedHeadAndBody, pc.t.TLSClientConfig.Policy())
 			if bre, ok := err.(requestBodyReadError); ok {
 				err = bre.error
 				// Errors reading from the user's
