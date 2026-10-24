@@ -478,6 +478,10 @@ type transportRequest struct {
 
 	mu  sync.Mutex // guards err
 	err error      // first setError value for mapRoundTripError to consider
+
+	// writeErr is the error a write of the request to its connection
+	// failed with, set by persistConn.roundTrip before it returns.
+	writeErr error
 }
 
 func (tr *transportRequest) extraHeaders() Header {
@@ -557,6 +561,7 @@ func (t *Transport) roundTrip(req *Request) (*Response, error) {
 	origReq := req
 	cancelKey := cancelKey{origReq}
 	req = setupRewindBody(req)
+	policy, resends := t.TLSClientConfig.Policy(), ResendsOf(ctx)
 
 	if altRT := t.alternateRoundTripper(req); altRT != nil {
 		if resp, err := altRT.RoundTrip(req); err != ErrSkipAltProtocol {
@@ -618,6 +623,18 @@ func (t *Transport) roundTrip(req *Request) (*Response, error) {
 		} else {
 			resp, err = pconn.roundTrip(treq)
 		}
+		if err == nil && pconn.alt == nil && resp.StatusCode == StatusRequestTimeout && pconn.isReused() && policy.Flag("h1.request_timeout_resend") {
+			// A 408 on a reused connection: Chrome closes the connection,
+			// the answer unread, and sends the request again
+			// (HttpNetworkTransaction::DoReadHeadersComplete).
+			pconn.close(errResentAfterTimeout)
+			resp.Body.Close()
+			testHookRoundTripRetried()
+			if req, err = rewindBody(req); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if err == nil {
 			resp.Request = origReq
 			return resp, nil
@@ -627,6 +644,19 @@ func (t *Transport) roundTrip(req *Request) (*Response, error) {
 		if http2isNoCachedConnError(err) {
 			if t.removeIdleConn(pconn) {
 				t.decConnsPerHost(pconn.cacheKey)
+			}
+		} else if policy.Has("http.connection_error_retries") {
+			// A reused connection lost before any of the answer came: the
+			// request goes again at once, as Chrome sends it again
+			// (HttpNetworkTransaction::HandleIOError), by the methods the
+			// profile names and as many times as it says.
+			if !(pconn.alt == nil && pconn.isReused() && lostBeforeAnswer(err, treq.writeErr) &&
+				(policy.Text("http.connection_error_methods") == "any" || req.isReplayable()) &&
+				resends.Lost(policy.Int("http.connection_error_retries"))) {
+				if e, ok := err.(transportReadFromServerError); ok {
+					err = e.err
+				}
+				return nil, err
 			}
 		} else if !pconn.shouldRetryRequest(req, err) {
 			// Issue 16465: return underlying net.Conn.Read error from peek,
@@ -749,6 +779,24 @@ func (pc *persistConn) shouldRetryRequest(req *Request, err error) bool {
 	}
 	return false // conservatively
 }
+
+// lostBeforeAnswer says whether err, which a request's round trip ended
+// with, says its connection was lost before any of its answer came: the
+// server closed the idle connection it was given, nothing of it was written,
+// or the first read of the answer or writeErr, a write of the request, found
+// the connection lost (ConnectionLost).
+func lostBeforeAnswer(err, writeErr error) bool {
+	switch e := err.(type) {
+	case nothingWrittenError:
+		return true
+	case transportReadFromServerError:
+		return ConnectionLost(e.err)
+	}
+	return err == errServerClosedIdle || writeErr != nil && ConnectionLost(writeErr)
+}
+
+// errResentAfterTimeout is why a reused connection a 408 came on was closed.
+var errResentAfterTimeout = errors.New("http: 408 on a reused connection: closed, the request sent again")
 
 // ErrSkipAltProtocol is a sentinel error value defined by Transport.RegisterProtocol.
 var ErrSkipAltProtocol = errors.New("net/http: skip alternate protocol")
@@ -2712,6 +2760,12 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 				req.logf("writeErrCh resv: %T/%#v", err, err)
 			}
 			if err != nil {
+				// A failed write, not a body that failed to read.
+				req.mu.Lock()
+				if req.err == nil {
+					req.writeErr = err
+				}
+				req.mu.Unlock()
 				pc.close(fmt.Errorf("write error: %v", err))
 				return nil, pc.mapRoundTripError(req, startBytesWritten, err)
 			}

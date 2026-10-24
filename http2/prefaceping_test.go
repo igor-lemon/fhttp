@@ -447,7 +447,7 @@ func TestNoPingGoesWhileTheCheckOfOneIsPending(t *testing.T) {
 // unanswered with nothing read for h2.preface_ping_hung_ms gives the
 // connection up: GOAWAY as the profile says, if it says one, then the
 // connection closes, and the request, its body again, goes on another
-// connection, h2.preface_ping_failed_retries times at most.
+// connection, as many times as h2.retries says for ping-failed.
 func TestAnUnansweredPingGivesTheConnectionUpAndTheRequestGoesAgain(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -455,9 +455,9 @@ func TestAnUnansweredPingGivesTheConnectionUpAndTheRequestGoesAgain(t *testing.T
 		goaway []string // what the connection says before it closes
 		again  bool
 	}{
-		{"chrome", map[string]any{"h2.preface_ping_failed_goaway_code": 1, "h2.preface_ping_failed_goaway_debug": "Failed ping.", "h2.preface_ping_failed_retries": 2}, []string{"G0/1:Failed ping."}, true},
-		{"no-debug", map[string]any{"h2.preface_ping_failed_goaway_code": 2, "h2.preface_ping_failed_retries": 1}, []string{"G0/2:"}, true},
-		{"no-goaway", map[string]any{"h2.preface_ping_failed_retries": 1}, nil, true},
+		{"chrome", map[string]any{"h2.preface_ping_failed_goaway_code": 1, "h2.preface_ping_failed_goaway_debug": "Failed ping.", "h2.retries": 2, "h2.retry_errors": []string{"ping-failed"}}, []string{"G0/1:Failed ping."}, true},
+		{"no-debug", map[string]any{"h2.preface_ping_failed_goaway_code": 2, "h2.retries": 1, "h2.retry_errors": []string{"ping-failed"}}, []string{"G0/2:"}, true},
+		{"no-goaway", map[string]any{"h2.retries": 1, "h2.retry_errors": []string{"ping-failed"}}, nil, true},
 		{"no-retry", map[string]any{"h2.preface_ping_failed_goaway_code": 1}, []string{"G0/1:"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -569,7 +569,7 @@ func TestAConnectionHeldUpInAWriteIsGivenUpToo(t *testing.T) {
 // again on one dialed for it.
 func TestARequestOnlyForAConnectionHeldMayDialWhenItGoesAgain(t *testing.T) {
 	clients, servers := pairs(t, 2)
-	tr, _ := pingTransport(t, pingPolicy(t, 100, 300, map[string]any{"h2.preface_ping_failed_retries": 1}), clients...)
+	tr, _ := pingTransport(t, pingPolicy(t, 100, 300, map[string]any{"h2.retries": 1, "h2.retry_errors": []string{"ping-failed"}}), clients...)
 	a, b := newPeer(t, servers[0]), newPeer(t, servers[1])
 	exchange(t, tr, a, true, "H1e")
 	time.Sleep(200 * time.Millisecond)
@@ -594,7 +594,7 @@ func TestARequestOnlyForAConnectionHeldMayDialWhenItGoesAgain(t *testing.T) {
 // to go cannot go again.
 func TestARequestWhoseBodyCannotGoAgainSaysSo(t *testing.T) {
 	clients, servers := pairs(t, 2)
-	tr, _ := pingTransport(t, pingPolicy(t, 100, 300, map[string]any{"h2.preface_ping_failed_retries": 2}), clients...)
+	tr, _ := pingTransport(t, pingPolicy(t, 100, 300, map[string]any{"h2.retries": 2, "h2.retry_errors": []string{"ping-failed"}}), clients...)
 	a, _ := newPeer(t, servers[0]), newPeer(t, servers[1])
 	exchange(t, tr, a, true, "H1e")
 	time.Sleep(200 * time.Millisecond)
@@ -648,11 +648,11 @@ func idleConns(t *testing.T, n int, policy behavior.Policy) (*Transport, *listPo
 
 // TestARequestGoesAgainAsOftenAsTheProfileSaysAndAtOnce: each time the
 // connection it went on is given up for its PING the request goes again, at
-// once, h2.preface_ping_failed_retries times at most, then fails.
+// once, as many times as h2.retries says for ping-failed, then fails.
 func TestARequestGoesAgainAsOftenAsTheProfileSaysAndAtOnce(t *testing.T) {
 	for retries := range 3 {
 		t.Run(fmt.Sprint(retries), func(t *testing.T) {
-			tr, pool, peers := idleConns(t, 4, pingPolicy(t, 100, 200, map[string]any{"h2.preface_ping_failed_retries": retries}))
+			tr, pool, peers := idleConns(t, 4, pingPolicy(t, 100, 200, map[string]any{"h2.retries": retries, "h2.retry_errors": []string{"ping-failed"}}))
 			req, _ := http.NewRequest("GET", "https://dummy.tld/", nil)
 			began := time.Now()
 			_, err := tr.RoundTrip(req)
@@ -673,26 +673,43 @@ func TestARequestGoesAgainAsOftenAsTheProfileSaysAndAtOnce(t *testing.T) {
 	}
 }
 
-// TestATryAfterAPingIsNotOneOfTheTransportsOwn: after a request went again for
-// a PING, the transport's own first try again (a refused stream) is still at
-// once, where its second waits a second.
-func TestATryAfterAPingIsNotOneOfTheTransportsOwn(t *testing.T) {
-	tr, _, peers := idleConns(t, 3, pingPolicy(t, 100, 200, map[string]any{"h2.preface_ping_failed_retries": 2}))
-	req, _ := http.NewRequest("GET", "https://dummy.tld/", nil)
-	began := time.Now()
-	done := fetch(tr, req)
-	peers[0].expect("H1e", "P1")
-	got := peers[1].expect("H1e", "P1")
-	peers[1].ack(got[1].ping)
-	peers[1].refuse(1)
-	got = peers[2].expect("H1e", "P1")
-	peers[2].ack(got[1].ping)
-	peers[2].answer(1)
-	if err := waitFor(t, done); err != nil {
-		t.Fatal(err)
-	}
-	if took := time.Since(began); took > 900*time.Millisecond {
-		t.Errorf("took %v: the refused stream's try waited", took)
+// TestAPingFailedAndARefusedStreamShareTheirRetries: a request that went again
+// for its connection's PING and then for its refused stream spent two of the
+// h2.retries both are counted in, as Chrome counts retry_attempts_; each goes
+// at once.
+func TestAPingFailedAndARefusedStreamShareTheirRetries(t *testing.T) {
+	for _, tc := range []struct {
+		retries  int
+		answered bool
+	}{{2, true}, {1, false}} {
+		t.Run(fmt.Sprint(tc.retries), func(t *testing.T) {
+			tr, pool, peers := idleConns(t, 3, pingPolicy(t, 100, 200, map[string]any{"h2.retries": tc.retries, "h2.retry_errors": []string{"ping-failed", "refused-stream"}}))
+			req, _ := http.NewRequest("GET", "https://dummy.tld/", nil)
+			began := time.Now()
+			done := fetch(tr, req)
+			peers[0].expect("H1e", "P1")
+			got := peers[1].expect("H1e", "P1")
+			peers[1].ack(got[1].ping)
+			peers[1].refuse(1)
+			if tc.answered {
+				got = peers[2].expect("H1e", "P1")
+				peers[2].ack(got[1].ping)
+				peers[2].answer(1)
+			}
+			err := waitFor(t, done)
+			if tc.answered != (err == nil) {
+				t.Fatalf("got %v, answered %v", err, tc.answered)
+			}
+			if se, ok := err.(StreamError); !tc.answered && (!ok || se.Code != ErrCodeRefusedStream) {
+				t.Fatalf("got %v, want the refused stream's", err)
+			}
+			if pool.given != tc.retries+1 {
+				t.Fatalf("went on %d connections, want %d", pool.given, tc.retries+1)
+			}
+			if took := time.Since(began); took > 900*time.Millisecond {
+				t.Errorf("took %v: a try waited", took)
+			}
+		})
 	}
 }
 

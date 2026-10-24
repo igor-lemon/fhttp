@@ -26,8 +26,9 @@ import (
 // that long after the last read. Any acknowledgement answers the PING,
 // whatever it says. A connection given up fails its streams, says GOAWAY
 // (h2.preface_ping_failed_goaway_code and _debug) and closes; a request that
-// had no answer yet goes again on another connection, at once,
-// h2.preface_ping_failed_retries times at most (Chrome's
+// had no answer yet goes again on another connection when h2.retry_errors
+// names "ping-failed", as many times as h2.retries says for it and the other
+// failures it names together (resend.go; Chrome's
 // HttpNetworkTransaction::HandleIOError of ERR_HTTP2_PING_FAILED).
 
 // errPrefacePingFailed is what the streams of a connection given up for an

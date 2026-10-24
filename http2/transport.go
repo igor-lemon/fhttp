@@ -421,8 +421,9 @@ type ClientConn struct {
 	readerDone    chan struct{} // closed on error
 	readerErr     error         // set before readerDone is closed
 
-	reused    uint32 // whether conn is being reused; atomic
-	singleUse bool   // whether being used for a single http.Request
+	reused    uint32      // whether conn is being reused; atomic
+	singleUse bool        // whether being used for a single http.Request
+	readAny   atomic.Bool // whether the read loop has read a frame
 
 	streams         map[uint32]*clientStream // client-initiated
 	t               *Transport
@@ -488,6 +489,11 @@ type clientStream struct {
 	pastTrailers bool // got optional second MetaHeadersFrame (trailers)
 
 	peerReset chan struct{} // closed on peer reset
+
+	// reused is a stream opened on a connection that had read a frame,
+	// guarded by cc.mu; informed is one that had a 1xx answer.
+	reused   bool
+	informed atomic.Bool
 
 	detached      bool  // its body let go of (Detach); guarded by cc.mu
 	readErr       error // sticky read error; owned by transportResponseBody.Read
@@ -694,9 +700,11 @@ func (t *Transport) RoundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 	}
 
 	addr := authorityAddr(req.URL.Scheme, req.URL.Host)
-	pinged := 0 // times req went again after its connection was given up for its PING
+	if t.policy().Has("h2.retries") {
+		return t.resending(req, opt, addr)
+	}
 	for retry := 0; ; retry++ {
-		cc, err := t.getClientConn(req, addr, opt.OnlyCachedConn && retry == 0 && pinged == 0)
+		cc, err := t.getClientConn(req, addr, opt.OnlyCachedConn && retry == 0)
 		if err != nil {
 			t.vlogf("http2: Transport failed to get client conn for %s: %v", addr, err)
 
@@ -705,17 +713,6 @@ func (t *Transport) RoundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 		reused := !atomic.CompareAndSwapUint32(&cc.reused, 0, 1)
 		traceGotConn(req, cc, reused)
 		res, gotErrAfterReqBodyWrite, err := cc.roundTrip(req)
-		if err == errPrefacePingFailed && pinged < t.policy().Int("h2.preface_ping_failed_retries") {
-			// It goes again at once, on another connection, as Chrome
-			// sends a request again after ERR_HTTP2_PING_FAILED: not one of
-			// the transport's own tries, which wait longer each time.
-			if req, err = rewound(req, err, gotErrAfterReqBodyWrite); err != nil {
-				return nil, err
-			}
-			pinged++
-			retry--
-			continue
-		}
 		if err != nil && retry <= 6 {
 			if req, err = shouldRetryRequest(req, err, gotErrAfterReqBodyWrite); err == nil {
 				// After the first retry, do exponential backoff with 10% jitter.
@@ -735,7 +732,7 @@ func (t *Transport) RoundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 		if err != nil {
 			t.vlogf("RoundTrip failure: %v", err)
 
-			return nil, err
+			return nil, unlost(err)
 		}
 
 		return res, nil
@@ -815,7 +812,7 @@ func rewound(req *http.Request, err error, afterBodyWrite bool) (*http.Request, 
 }
 
 func canRetryError(err error) bool {
-	if err == errClientConnUnusable || err == errClientConnGotGoAway {
+	if _, goneAway := err.(goneAwayError); goneAway || err == errClientConnUnusable {
 		return true
 	}
 	if se, ok := err.(StreamError); ok {
@@ -1125,7 +1122,7 @@ func (cc *ClientConn) setGoAway(f *GoAwayFrame) {
 	for streamID, cs := range cc.streams {
 		if streamID > last {
 			select {
-			case cs.resc <- resAndError{err: errClientConnGotGoAway}:
+			case cs.resc <- resAndError{err: goneAwayError{code: f.ErrCode}}:
 			default:
 			}
 		}
@@ -1398,7 +1395,7 @@ func actualContentLength(req *http.Request) int64 {
 func (cc *ClientConn) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, _, err := cc.roundTrip(req)
 
-	return resp, err
+	return resp, unlost(err)
 }
 
 func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAfterReqBodyWrite bool, err error) {
@@ -1448,6 +1445,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	}
 
 	cs := cc.newStream()
+	cs.reused = cc.readAny.Load()
 	cs.req = sent
 	cs.trace = httptrace.ContextClientTrace(req.Context())
 	cs.requestedGzip = requestedGzip
@@ -1481,7 +1479,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 		// no need to keep writing)
 		traceWroteRequest(cs.trace, werr)
 
-		return nil, false, werr
+		return nil, false, lost(cs, werr)
 	}
 
 	var respHeaderTimer <-chan time.Time
@@ -1579,7 +1577,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 			if err != nil {
 				cc.forgetStreamID(cs.ID)
 
-				return nil, cs.getStartedWrite(), err
+				return nil, cs.getStartedWrite(), lost(cs, err)
 			}
 			if d := cc.responseHeaderTimeout(); d != 0 {
 				timer := time.NewTimer(d)
@@ -2371,7 +2369,7 @@ func (rl *clientConnReadLoop) cleanup() {
 	for _, cs := range cc.streams {
 		cs.bufPipe.CloseWithError(err) // no-op if already closed
 		select {
-		case cs.resc <- resAndError{err: err}:
+		case cs.resc <- resAndError{err: lost(cs, err)}:
 		default:
 		}
 		close(cs.done)
@@ -2395,6 +2393,9 @@ func (rl *clientConnReadLoop) run() error {
 		f, err := cc.fr.ReadFrame()
 		if t != nil {
 			t.Reset(readIdleTimeout)
+		}
+		if err == nil {
+			cc.readAny.Store(true)
 		}
 		if err != nil {
 			cc.vlogf("http2: Transport readFrame error on conn %p: (%T) %v", cc, err, err)
@@ -2592,6 +2593,7 @@ func (rl *clientConnReadLoop) handleResponse(cs *clientStream, f *MetaHeadersFra
 	}
 
 	if statusCode >= 100 && statusCode <= 199 {
+		cs.informed.Store(true)
 		cs.num1xx++
 		const max1xxResponses = 5 // arbitrary bound on number of informational responses, same as net/http
 		if cs.num1xx > max1xxResponses {

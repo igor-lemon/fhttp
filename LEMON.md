@@ -243,10 +243,10 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   (`failStreamsLocked`, out of `closeForError`), then says GOAWAY
   (`h2.preface_ping_failed_goaway_code`, `_debug`) under a write deadline of
   the hung time, so that a write the dead connection holds up gives up, then
-  closes. `RoundTripOpt` sends a request that got `errPrefacePingFailed`
-  again at once, `h2.preface_ping_failed_retries` times at most, through
-  `rewound` (split out of `shouldRetryRequest`), not as one of its own tries
-  (`retry--`), and lets it dial (`OnlyCachedConn` on the first try only).
+  closes. A request that got `errPrefacePingFailed` goes again as a
+  failure "ping-failed" of `h2.retry_errors` (below, a request sent again),
+  through `rewound` (split out of `shouldRetryRequest`), and may dial
+  (`OnlyCachedConn` on the first try only).
   Measured on Chrome 155.0.8059.85 (tls-forge's review bench, 2026-10-23):
   HEADERS then PING 1, 2; a streamed body's DATA after PING 1; an unanswered
   PING: GOAWAY PROTOCOL_ERROR "Failed ping." 10.01 s after it, the request
@@ -292,4 +292,43 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   and trailer included, is all in the reader's buffer within a limit.
   Measured on Chrome 155.0.8059.85 (tls-forge's review bench, 2026-10-23,
   `lg-*`). Tests in `drain_test.go`, `drain_internal_test.go`,
-  `http2/drainbody_test.go`, `internal/chunked_buffer_test.go`.
+  `drain_limit_test.go`, `http2/drainbody_test.go`,
+  `internal/chunked_buffer_test.go`; 40 mutants, all killed. One that first
+  survived showed a branch unreachable: a body that ends within the limit
+  says so with its last bytes (a length run out; the chunked reader takes the
+  last chunk and the trailer with them when they are there), so DrainBody no
+  longer reads on for its end past the limit.
+- A request sent again as Chrome's network stack sends one again
+  (HttpNetworkTransaction::HandleIOError, ShouldResendRequest, the 408 of
+  DoReadHeadersComplete; SpdySession::OnRstStream, OnGoAway). `Resends`
+  (`resends.go`) counts a request's tries for a failure that says it was not
+  processed and, apart, for a lost connection, per round trip or as a
+  context carries them (`WithResends`; tls-forge gives a redirect's hop one,
+  its 401 and 421 answers sharing it). Over HTTP/2, when the policy says
+  `h2.retries` (`http2/resend.go`, `resending`): a stream refused, one above
+  a GOAWAY with NO_ERROR or another code (`goneAwayError`, which `setGoAway`
+  now sends), a connection given up for its PING go again at once
+  (`h2.retry_delay_ms` after) when `h2.retry_errors` names them, `h2.retries`
+  times at most all together; a stream whose reused connection (one that had
+  read a frame when it opened, `cc.readAny`, as Chrome's IsReused counts
+  frames received) was lost under it, closed, reset, a HEADERS or DATA write
+  failing (`lostConnError`, by `lost` in `cleanup` and both writes; a 1xx
+  answer makes it final), goes again on another when the policy says
+  `http.connection_error_retries`, as many times, by any method or an
+  idempotent one (`http.connection_error_methods`); a connection that could
+  take it no more goes again at once, seven times at most. Without the key,
+  x/net's own seven tries, a second apart and longer each time, after a
+  refused stream or any GOAWAY. Every error goes out as the connection said
+  it (`unlost`). Over HTTP/1.1 (`transport.go`): with
+  `http.connection_error_retries` a request whose reused connection was lost
+  before any of its answer came (`lostBeforeAnswer`: the idle connection
+  closed, nothing written, the first read or a write finding it lost,
+  `ConnectionLost`; the write's error kept on the request, `writeErr`, not
+  wrapped) goes again, by the methods said, as many times; with
+  `h1.request_timeout_resend` a 408 on a reused connection closes it, unread,
+  and the request goes again. Measured on Chrome 155.0.8059.85 (tls-forge's
+  review bench, 2026-10-24, `rc-*`). Tests in `http2/resend_test.go`,
+  `resend_test.go`, `resend_internal_test.go`, and the PING's in
+  `http2/prefaceping_test.go` moved to the new keys. 72 mutants: 71 killed,
+  1 equivalent (closing a 408's body after its connection was closed: the
+  read loop ends with the connection).
