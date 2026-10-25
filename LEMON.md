@@ -353,12 +353,17 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
 - **Whether a transport holds a connection** (`Transport.HasConn(scheme,
   addr)`, `http2.Transport.HasConn(addr)`, 2026-10-25): an idle one, one in
   use where `MaxConnsPerHost` has them counted, or, over HTTP/2, one its own
-  pool holds or dials for the address; never a proxy's or a tunnel's.
-  tls-client asks them as Chromium asks whether a request's socket group has
-  a socket (`TargettedSocketGroupHasActiveSocket`) before it holds TCP back
-  behind QUIC. Tests `hasconn_test.go`, `http2/hasconn_test.go`; 8 mutants:
-  7 killed, and the eighth was of a check that went (an empty idle list,
-  which the transport never keeps).
+  pool holds that can take a request (not closed, closing or gone away, as
+  an available session is Chromium's) or dials for the address; never a
+  proxy's or a tunnel's. tls-client asks them as Chromium asks whether a
+  request's socket group has a socket (`TargettedSocketGroupHasActiveSocket`)
+  before it holds TCP back behind QUIC. Until 2026-10-25 an HTTP/2
+  connection `CloseIdleConnections` had closed counted until its read loop
+  let the pool forget it, and a request meant to wait behind QUIC went over
+  TCP at once (tls-client's `TestAnAlternativesConnectionIsTimedForItsOrigin`
+  in half its runs). Tests `hasconn_test.go`, `http2/hasconn_test.go`; 9
+  mutants: 8 killed, and the ninth was of a check that went (an empty idle
+  list, which the transport never keeps).
 
 - **A connection kept unused counts as reused** (`Transport.UnusedIdle`,
   `http2.Transport.UnusedIdle`): a connection the transport is given that
