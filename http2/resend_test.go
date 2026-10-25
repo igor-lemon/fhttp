@@ -615,7 +615,11 @@ func TestAClientConnSaysWhatItsConnectionSaid(t *testing.T) {
 	}()
 	p.expect("H1e")
 	p.hangUp(false)
-	if err := waitFor(t, done); err != io.ErrUnexpectedEOF {
-		t.Fatalf("got %T %v, want %v", err, err, io.ErrUnexpectedEOF)
+	// The peer's close is a FIN, or a reset where the client's last frames
+	// were still unread on its side: either is said as it was, unwrapped.
+	err = waitFor(t, done)
+	_, raw := err.(*net.OpError)
+	if err != io.ErrUnexpectedEOF && !(raw && errors.Is(err, syscall.ECONNRESET)) {
+		t.Fatalf("got %T %v, want %v or the connection's reset", err, err, io.ErrUnexpectedEOF)
 	}
 }
