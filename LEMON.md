@@ -332,3 +332,20 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   `http2/prefaceping_test.go` moved to the new keys. 72 mutants: 71 killed,
   1 equivalent (closing a 408's body after its connection was closed: the
   read loop ends with the connection).
+
+- **A body that waits is closed when the answer says no**
+  (`clientStream.abortRequestBodyWrite`, `closeRequestBody` in
+  `http2/transport.go`): an answer over 299, a GOAWAY that takes the stream,
+  a stream reset or the request's end stop the body's writer, which looked
+  for the stop only between frames, so one blocked in the body's Read (a
+  CONNECT's `io.Pipe`, whose writer tls-forge holds until the tunnel opens)
+  never saw it, and RoundTrip, waiting for the writer, never returned: a
+  CONNECT an HTTP/2 proxy refused (403, 407) hung for good, the request's
+  deadline included (found by tls-forge's proxy pool tests, 2026-10-25). The
+  body is now closed under that Read, in a goroutine, as x/net's
+  `closeReqBodyLocked` does, once whoever closes it first (`bodyClosing`);
+  a Read that fails so is the stop, not the body's failure: a stop that
+  cancels resets the stream, as between frames. Tests in
+  `http2/abortbody_test.go` (a pipe body refused with 403, taken by a GOAWAY
+  and ended with its request, which resets the stream; a body written whole,
+  then refused, closed once); 4 mutants, all killed.

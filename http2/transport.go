@@ -505,6 +505,7 @@ type clientStream struct {
 	resTrailer   *http.Header           // client's Response.Trailer
 	startedWrite bool                   // started request body write; guarded by cc.mu
 	stopReqBody  error                  // if non-nil, stop writing req body; guarded by cc.mu
+	bodyClosing  sync.Once              // closes req.Body once: after it is written, or when aborted
 	trace        *httptrace.ClientTrace // or nil
 
 	trailer http.Header // accumulated trailers
@@ -607,6 +608,20 @@ func (cs *clientStream) abortRequestBodyWrite(err error) {
 	cs.stopReqBody = err
 	cc.cond.Broadcast()
 	cc.mu.Unlock()
+	// A writer blocked in the body's Read sees no stop: the body is closed
+	// under it, as x/net's closeReqBodyLocked does, so that its Read returns
+	// and RoundTrip, which waits for the writer, returns too. A CONNECT's
+	// pipe would otherwise hold a refused tunnel forever.
+	if body := cs.req.Body; body != nil {
+		go func() { _ = cs.closeRequestBody(body) }()
+	}
+}
+
+// closeRequestBody closes the request's body once, whoever gets there first:
+// the writer done with it, or an abort under a Read that waits.
+func (cs *clientStream) closeRequestBody(body io.Closer) (err error) {
+	cs.bodyClosing.Do(func() { err = body.Close() })
+	return err
 }
 
 type stickyErrWriter struct {
@@ -1769,7 +1784,7 @@ func (cs *clientStream) writeRequestBody(body io.Reader, bodyCloser io.Closer) (
 		// Request.Body is closed by the Transport,
 		// and in multiple cases: server replies <=299 and >299
 		// while still writing request body
-		cerr := bodyCloser.Close()
+		cerr := cs.closeRequestBody(bodyCloser)
 		if err == nil {
 			err = cerr
 		}
@@ -1829,9 +1844,19 @@ func (cs *clientStream) writeRequestBody(body io.Reader, bodyCloser io.Closer) (
 			sawEOF = true
 			err = nil
 		} else if err != nil {
-			cc.writeStreamReset(cs.ID, ErrCodeCancel, err)
-
-			return err
+			// A body closed under the Read by an abort is a stop, as one
+			// seen between frames (awaitFlowControl), not the body's failure.
+			cc.mu.Lock()
+			stopped := cs.stopReqBody
+			cc.mu.Unlock()
+			switch stopped {
+			case nil:
+				cc.writeStreamReset(cs.ID, ErrCodeCancel, err)
+				return err
+			case errStopReqBodyWriteAndCancel:
+				cc.writeStreamReset(cs.ID, ErrCodeCancel, nil)
+			}
+			return stopped
 		}
 
 		remain := buf[:n]
