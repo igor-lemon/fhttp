@@ -226,6 +226,14 @@ type Transport struct {
 	// it.
 	IdleConnReapOnRequest bool
 
+	// UnusedIdle, when set, says of a connection the Transport has just been
+	// given whether it waited idle before its first request, as a socket
+	// Chromium's pool kept unused does (ClientSocketHandle UNUSED_IDLE): it
+	// is reused then, and a request it loses before any of its answer may go
+	// again on a new connection, as one on a connection that answered before
+	// may.
+	UnusedIdle func(net.Conn) bool
+
 	// ResponseHeaderTimeout, if non-zero, specifies the amount of
 	// time to wait for a server's response headers after fully
 	// writing the request (including its body, if any). This
@@ -1851,6 +1859,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 
 	pconn.br = bufio.NewReaderSize(pconn, t.readBufferSize())
 	pconn.bw = bufio.NewWriterSize(persistConnWriter{pconn}, t.writeBufferSize())
+	pconn.reused = t.UnusedIdle != nil && t.UnusedIdle(pconn.conn)
 
 	go pconn.readLoop()
 	go pconn.writeLoop()
