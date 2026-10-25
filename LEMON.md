@@ -349,3 +349,25 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   `http2/abortbody_test.go` (a pipe body refused with 403, taken by a GOAWAY
   and ended with its request, which resets the stream; a body written whole,
   then refused, closed once); 4 mutants, all killed.
+
+- **Whether a transport holds a connection** (`Transport.HasConn(scheme,
+  addr)`, `http2.Transport.HasConn(addr)`, 2026-10-25): an idle one, one in
+  use where `MaxConnsPerHost` has them counted, or, over HTTP/2, one its own
+  pool holds or dials for the address; never a proxy's or a tunnel's.
+  tls-client asks them as Chromium asks whether a request's socket group has
+  a socket (`TargettedSocketGroupHasActiveSocket`) before it holds TCP back
+  behind QUIC. Tests `hasconn_test.go`, `http2/hasconn_test.go`; 8 mutants:
+  7 killed, and the eighth was of a check that went (an empty idle list,
+  which the transport never keeps).
+
+- **A connection kept unused counts as reused** (`Transport.UnusedIdle`,
+  `http2.Transport.UnusedIdle`): a connection the transport is given that
+  waited idle before its first request, as a socket Chromium's pool kept
+  unused does (UNUSED_IDLE), is a reused one (`pconn.reused`, a stream's
+  `reused`), so a request it loses before any of its answer goes again on
+  another, as `http.connection_error_retries` says. tls-client marks so the
+  TCP connection that lost a race to QUIC. Tests `unusedidle_test.go`,
+  `http2/unusedidle_test.go`; 3 mutants, all killed.
+  `TestAClientConnSaysWhatItsConnectionSaid` takes a reset as well as EOF: a
+  peer that closes with the client's last frames unread on its side resets
+  the connection (2 runs of 30 at the base).
