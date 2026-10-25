@@ -158,6 +158,13 @@ type Transport struct {
 	// peer allows.
 	MaxHeaderFramePayload uint32
 
+	// UnusedIdle, when set, says of a connection the Transport has just been
+	// given whether it waited idle before its first request, as a socket
+	// Chromium's pool kept unused does (ClientSocketHandle UNUSED_IDLE): its
+	// streams are reused ones then (SpdySession::IsReused), and one it loses
+	// before any of its answer may go again on a new connection.
+	UnusedIdle func(net.Conn) bool
+
 	// MaxDataFramePayload, when set below the peer's SETTINGS_MAX_FRAME_SIZE,
 	// is the largest payload of a DATA frame of a request's body the
 	// transport writes: the body is read and sent that much at a time, as the
@@ -424,6 +431,9 @@ type ClientConn struct {
 	reused    uint32      // whether conn is being reused; atomic
 	singleUse bool        // whether being used for a single http.Request
 	readAny   atomic.Bool // whether the read loop has read a frame
+	// unusedIdle is a connection that waited idle before it was given to
+	// the transport (Transport.UnusedIdle): its streams are reused ones.
+	unusedIdle bool
 
 	streams         map[uint32]*clientStream // client-initiated
 	t               *Transport
@@ -931,6 +941,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 		singleUse:             singleUse,
 		wantSettingsAck:       true,
 		pings:                 make(map[[8]byte]chan struct{}),
+		unusedIdle:            t.UnusedIdle != nil && t.UnusedIdle(c),
 	}
 
 	// ------------------------------------------------------------------
@@ -1460,7 +1471,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	}
 
 	cs := cc.newStream()
-	cs.reused = cc.readAny.Load()
+	cs.reused = cc.readAny.Load() || cc.unusedIdle
 	cs.req = sent
 	cs.trace = httptrace.ContextClientTrace(req.Context())
 	cs.requestedGzip = requestedGzip
