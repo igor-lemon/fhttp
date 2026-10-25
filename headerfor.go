@@ -5,6 +5,7 @@ package http
 const (
 	ProtocolHTTP1 = "http/1.1"
 	ProtocolHTTP2 = "h2"
+	ProtocolHTTP3 = "h3"
 )
 
 // WrittenHeader is the header r is written with over protocol: the one its
