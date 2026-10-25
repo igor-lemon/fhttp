@@ -359,6 +359,7 @@ func (t *Transport) Clone() *Transport {
 		MaxConnsPerHost:        t.MaxConnsPerHost,
 		IdleConnTimeout:        t.IdleConnTimeout,
 		IdleConnReapOnRequest:  t.IdleConnReapOnRequest,
+		UnusedIdle:             t.UnusedIdle,
 		ResponseHeaderTimeout:  t.ResponseHeaderTimeout,
 		ExpectContinueTimeout:  t.ExpectContinueTimeout,
 		ProxyConnectHeader:     t.ProxyConnectHeader.Clone(),
