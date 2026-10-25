@@ -371,3 +371,7 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   `TestAClientConnSaysWhatItsConnectionSaid` takes a reset as well as EOF: a
   peer that closes with the client's last frames unread on its side resets
   the connection (2 runs of 30 at the base).
+
+- `ProtocolHTTP3` ("h3", 2026-10-25): the protocol quic-go-utls's http3
+  asks a request's `HeaderFor` for the header it writes, as HTTP/1.1 and
+  HTTP/2 here do.
