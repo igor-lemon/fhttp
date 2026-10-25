@@ -8,7 +8,6 @@ import (
 	"errors"
 	"net"
 	"testing"
-	"time"
 
 	http "github.com/igor-lemon/fhttp"
 	tls "github.com/igor-lemon/utls"
@@ -48,8 +47,34 @@ func TestATransportSaysWhetherItHasAConnectionForAnAddress(t *testing.T) {
 	if tr.HasConn("other.tld:443") {
 		t.Error("one for another address")
 	}
+	// A connection that can take no request is none: one closed, closing or
+	// gone away, before its read loop has the pool let it go.
+	pool := tr.connPool().(*clientConnPool)
+	pool.mu.Lock()
+	cc := pool.conns[addr][0]
+	pool.mu.Unlock()
+	for name, state := range map[string]func(){
+		"closed":    func() { cc.closed = true },
+		"closing":   func() { cc.closing = true },
+		"gone away": func() { cc.goAway = &GoAwayFrame{} },
+	} {
+		cc.mu.Lock()
+		closed, closing, goAway := cc.closed, cc.closing, cc.goAway
+		state()
+		cc.mu.Unlock()
+		if tr.HasConn(addr) {
+			t.Errorf("one %s", name)
+		}
+		cc.mu.Lock()
+		cc.closed, cc.closing, cc.goAway = closed, closing, goAway
+		cc.mu.Unlock()
+	}
+	if !tr.HasConn(addr) {
+		t.Error("none once it can take a request again")
+	}
+	// Closed as idle: none at once, though its read loop has yet to end.
 	tr.CloseIdleConnections()
-	if !waitCondition(time.Second, 5*time.Millisecond, func() bool { return !tr.HasConn(addr) }) {
+	if tr.HasConn(addr) {
 		t.Error("one once it is closed")
 	}
 	// A pool of the caller's says nothing.
