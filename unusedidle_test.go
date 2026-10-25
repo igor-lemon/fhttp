@@ -14,6 +14,14 @@ import (
 	. "github.com/igor-lemon/fhttp"
 )
 
+func TestACloneKeepsUnusedIdle(t *testing.T) {
+	asked := 0
+	tr := &Transport{UnusedIdle: func(net.Conn) bool { asked++; return true }}
+	if clone := tr.Clone(); clone.UnusedIdle == nil || !clone.UnusedIdle(nil) || asked != 1 {
+		t.Error("the clone does not say of a connection what its transport says")
+	}
+}
+
 // losesFirst is a plain HTTP server that lets go of its first connection
 // under its request and answers on every other.
 func losesFirst(t *testing.T) string {

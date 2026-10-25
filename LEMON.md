@@ -366,8 +366,9 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   unused does (UNUSED_IDLE), is a reused one (`pconn.reused`, a stream's
   `reused`), so a request it loses before any of its answer goes again on
   another, as `http.connection_error_retries` says. tls-client marks so the
-  TCP connection that lost a race to QUIC. Tests `unusedidle_test.go`,
-  `http2/unusedidle_test.go`; 3 mutants, all killed.
+  TCP connection that lost a race to QUIC. `Transport.Clone` keeps it
+  (2026-10-25: it did not; `TestTransportClone` sets it). Tests
+  `unusedidle_test.go`, `http2/unusedidle_test.go`; 4 mutants, all killed.
   `TestAClientConnSaysWhatItsConnectionSaid` takes a reset as well as EOF: a
   peer that closes with the client's last frames unread on its side resets
   the connection (2 runs of 30 at the base).

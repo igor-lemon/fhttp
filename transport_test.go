@@ -5906,6 +5906,7 @@ func TestTransportClone(t *testing.T) {
 		MaxConnsPerHost:        1,
 		IdleConnTimeout:        time.Second,
 		IdleConnReapOnRequest:  true,
+		UnusedIdle:             func(net.Conn) bool { panic("") },
 		ResponseHeaderTimeout:  time.Second,
 		ExpectContinueTimeout:  time.Second,
 		ProxyConnectHeader:     Header{},
