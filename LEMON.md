@@ -265,7 +265,15 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   "root" or no policy leaves the priority as given. Measured on Chrome
   155.0.8059.85 (tls-forge's review bench, 2026-10-23: four `fetch()`es,
   and twelve streams of three weights, one ending midway). Tests in
-  `http2/dependency_test.go`; 13 mutants, all killed.
+  `http2/dependency_test.go`; 13 mutants, all killed. Since 2026-10-26 a
+  stream its answer's HEADERS end leaves its list before the answer is
+  handed on: a request's with a body was forgotten only after, and the hop
+  of a form's redirect depended on the form's stream on tls-forge's Linux
+  runner (CI run 40222769334), where Chrome's depended on none. An answer
+  `DrainBody` lets go of leaves it at once (`Leave`), as Chrome closes the
+  stream, whatever its body does after; one `AwaitBody` waits on, a
+  preflight's, stays until its first bytes, as Chrome kept one open 7 s.
+  5 mutants, all killed.
 - `noBody`, the body of every answer that has none, is x/net's stateless
   `noBodyReader`: the shared `NopCloser(bytes.NewReader(nil))` was written by
   each `io.Copy` (bytes.Reader.WriteTo), a data race when two such answers

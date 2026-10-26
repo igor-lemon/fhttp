@@ -5,13 +5,19 @@
 package http2
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"strings"
 	"testing"
+	"time"
 
 	http "github.com/igor-lemon/fhttp"
+	"github.com/igor-lemon/fhttp/http2/hpack"
+	"github.com/igor-lemon/fhttp/httptrace"
 	"github.com/igor-lemon/utls/behavior"
 )
 
@@ -187,6 +193,158 @@ func TestAStreamResetIsDependedOnNoMore(t *testing.T) {
 		if err := waitFor(t, done); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// connOf is the connection tr's pool holds, or nil.
+func connOf(tr *Transport) *ClientConn {
+	pool := tr.connPool().(*clientConnPool)
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	for _, conns := range pool.conns {
+		return conns[0]
+	}
+	return nil
+}
+
+// head answers stream with its head alone, its body to come.
+func (p *peer) head(stream uint32) {
+	var block bytes.Buffer
+	hpack.NewEncoder(&block).WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
+	p.write(func() error {
+		return p.fr.WriteHeaders(HeadersFrameParam{StreamID: stream, EndHeaders: true, BlockFragment: block.Bytes()})
+	})
+}
+
+// headed is a GET of weight w through tr whose answer's head is p's, its
+// body to come.
+func headed(t *testing.T, tr *Transport, p *peer, stream uint32, w uint8) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("GET", "https://dummy.tld/", nil)
+	got := make(chan *http.Response, 1)
+	go func() {
+		res, err := tr.RoundTrip(req.WithContext(WithHeaderPriority(context.Background(), PriorityParam{Exclusive: true, Weight: w})))
+		if err != nil {
+			t.Error(err)
+		}
+		got <- res
+	}()
+	p.expect(fmt.Sprintf("H%de", stream))
+	p.head(stream)
+	select {
+	case res := <-got:
+		if res == nil {
+			t.FailNow()
+		}
+		return res
+	case <-time.After(5 * time.Second):
+		t.Fatal("no answer")
+	}
+	return nil
+}
+
+// TestAStreamItsAnswerEndedIsDependedOnNoMoreBeforeTheAnswerIsHanded: the
+// stream of a request with a body that its answer's HEADERS end leaves its
+// list before the answer reaches whoever waits for it, who may send the next
+// request at once, as a form's redirect is: the transport forgets such a
+// stream only once it has handed the answer on, and the hop of tls-forge's
+// redir-form-302 depended on the form's stream on a Linux runner (CI run
+// 40222769334), where Chrome's depended on none.
+func TestAStreamItsAnswerEndedIsDependedOnNoMoreBeforeTheAnswerIsHanded(t *testing.T) {
+	clients, servers := pairs(t, 1)
+	tr, _ := pingTransport(t, dependencyPolicy(t, "nearest-weight"), clients...)
+	p := newPeer(t, servers[0])
+	listed := make(chan bool, 1)
+	trace := &httptrace.ClientTrace{GotFirstResponseByte: func() {
+		// On the connection's read loop, which hands the answer on next.
+		cc := connOf(tr)
+		if cc == nil {
+			listed <- true
+			return
+		}
+		cc.mu.Lock()
+		_, still := cc.weightOf[1]
+		cc.mu.Unlock()
+		listed <- still
+	}}
+	req, _ := http.NewRequest("POST", "https://dummy.tld/", strings.NewReader("x"))
+	ctx := httptrace.WithClientTrace(WithHeaderPriority(context.Background(), PriorityParam{Exclusive: true, Weight: 255}), trace)
+	done := fetch(tr, req.WithContext(ctx))
+	p.expect("H1", "D1e:x")
+	p.answer(1)
+	if err := waitFor(t, done); err != nil {
+		t.Fatal(err)
+	}
+	if <-listed {
+		t.Error("the answer was handed on while its stream was depended on")
+	}
+	next, _ := prioritized(tr, 255)
+	if got := p.headers(3); got.StreamDep != 0 {
+		t.Errorf("3 depends on %d", got.StreamDep)
+	}
+	p.answer(3)
+	if err := waitFor(t, next); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAStreamLetGoOfIsDependedOnNoMore: an answer let go of with
+// http.DrainBody, its body still to come, is a stream Chrome has closed: the
+// next request's HEADERS depend on it no more, though its body is read on
+// apart from them. One whose body is still read is depended on.
+func TestAStreamLetGoOfIsDependedOnNoMore(t *testing.T) {
+	clients, servers := pairs(t, 1)
+	tr, _ := pingTransport(t, dependencyPolicy(t, "nearest-weight"), clients...)
+	p := newPeer(t, servers[0])
+	read := headed(t, tr, p, 1, 255)
+	let := headed(t, tr, p, 3, 255)
+	drained := http.DrainBody(context.Background(), let, math.MaxInt64, 5*time.Second, 0)
+	next, _ := prioritized(tr, 255)
+	if got := p.headers(5); got.StreamDep != 1 {
+		t.Errorf("5 depends on %d, want 1: 3 was let go of, and 1 is still read", got.StreamDep)
+	}
+	// The body let go of comes, ends its stream and is read apart from the
+	// requests.
+	p.write(func() error { return p.fr.WriteData(3, true, []byte("rest")) })
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the body let go of was not read")
+	}
+	p.write(func() error { return p.fr.WriteData(1, true, []byte("rest")) })
+	if b, err := io.ReadAll(read.Body); err != nil || string(b) != "rest" {
+		t.Errorf("read %q, %v", b, err)
+	}
+	p.answer(5)
+	if err := waitFor(t, next); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAStreamAwaitedIsDependedOnUntilItsFirstBytes: an answer awaited with
+// http.AwaitBody, a preflight's, is a stream Chrome keeps open until the
+// first bytes of its body come (tls-forge's bench measured a preflight's
+// kept 7 s and reset at its first bytes): the next request's HEADERS depend
+// on it until then.
+func TestAStreamAwaitedIsDependedOnUntilItsFirstBytes(t *testing.T) {
+	clients, servers := pairs(t, 1)
+	tr, _ := pingTransport(t, dependencyPolicy(t, "nearest-weight"), clients...)
+	p := newPeer(t, servers[0])
+	awaited := http.AwaitBody(context.Background(), headed(t, tr, p, 1, 255), 5*time.Second, 0)
+	next, _ := prioritized(tr, 255)
+	if got := p.headers(3); got.StreamDep != 1 {
+		t.Errorf("3 depends on %d, want 1: its body is awaited", got.StreamDep)
+	}
+	p.write(func() error { return p.fr.WriteData(1, false, []byte("first")) })
+	select {
+	case <-awaited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the body awaited was not let go of at its first bytes")
+	}
+	p.expect(fmt.Sprintf("R1/%d", ErrCodeCancel))
+	p.answer(3)
+	if err := waitFor(t, next); err != nil {
+		t.Fatal(err)
 	}
 }
 

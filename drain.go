@@ -29,10 +29,13 @@ import (
 // what is sent next, as one does in Chrome, which decides what to send next
 // in another process, as long as that takes. The channel it returns is
 // closed once the body is done with, its connection back to be used again or
-// closed. r.Body is NoBody after.
+// closed. r.Body is NoBody after. An HTTP/2 stream is depended on by nothing
+// sent after DrainBody is called (h2.priority_dependency), however long its
+// body is waited for: Chrome closes it at once.
 func DrainBody(ctx context.Context, r *Response, limit int64, timeout, grace time.Duration) <-chan struct{} {
 	body := r.Body
 	r.Body = NoBody
+	leave(body)
 	if r.Close {
 		body.Close()
 		return doneAlready
@@ -141,6 +144,14 @@ func closeOn(ctx context.Context, body io.Closer, timeout time.Duration) func() 
 func detach(body io.ReadCloser) {
 	if d, ok := body.(interface{ Detach() }); ok {
 		d.Detach()
+	}
+}
+
+// leave takes an HTTP/2 answer's stream out of its connection's priority
+// lists (http2's Leave).
+func leave(body io.ReadCloser) {
+	if l, ok := body.(interface{ Leave() }); ok {
+		l.Leave()
 	}
 }
 

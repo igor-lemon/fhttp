@@ -2508,6 +2508,13 @@ func (rl *clientConnReadLoop) processHeaders(f *MetaHeadersFrame) error {
 	}
 	if f.StreamEnded() {
 		cs.gotEndStream = true
+		// The stream is over, as Chrome's network stack closes one before
+		// its answer reaches whoever waits for it, who may send another at
+		// once (a redirect's next hop): what is sent next depends on it no
+		// more, however late it is forgotten below.
+		cc.mu.Lock()
+		cc.undependLocked(f.StreamID)
+		cc.mu.Unlock()
 		// Issue 20521: If the stream has ended, streamByID() causes
 		// clientStream.done to be closed, which causes the request's bodyWriter
 		// to be closed with an errStreamClosed, which may be received by
@@ -2731,6 +2738,17 @@ func (b transportResponseBody) Detach() {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 	b.cs.detached = true
+}
+
+// Leave takes the stream out of its connection's priority lists at once, as
+// Chrome's network stack closes a stream it moves on from: what is sent next
+// on the connection depends on it no more, whatever becomes of its body
+// (http.DrainBody).
+func (b transportResponseBody) Leave() {
+	cc := b.cs.cc
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.undependLocked(b.cs.ID)
 }
 
 func (b transportResponseBody) Read(p []byte) (n int, err error) {
