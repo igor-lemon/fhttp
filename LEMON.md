@@ -30,6 +30,14 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
 
 ## Patches
 
+- **Bounded decoding of a fragmented literal** (CVE-2022-41723): backport
+  x/net's deferred string decoding. Parse the encoded name and value extents
+  before decoding either, so each additional value byte cannot decompress the
+  same large Huffman name again. Preserve this fork's separate encoded and
+  decoded string limits and its indexing choices. The regression runs in a
+  disposable process with a deadline and allocation ceiling: the original
+  implementation allocates about 230 MB, the corrected decoder about 0.6 MB.
+  Tests in `http2/hpack/fragmented_literal_test.go`.
 - **How each header field is written into HPACK** (`hpack.Representation`,
   `Encoder.SetRepresentation`, `http2.Transport.HeaderRepresentation`): for a
   field not found whole in a table, whether it goes into the dynamic table,
