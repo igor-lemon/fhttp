@@ -68,6 +68,9 @@ type Transport struct {
 	AllowHTTP       bool
 	InitialStreamID uint32
 	ConnectionFlow  uint32
+	// ConnectionFlowSet preserves an explicitly configured zero: no initial
+	// connection WINDOW_UPDATE. Unset zero retains the legacy backend default.
+	ConnectionFlowSet bool
 
 	// ConnPool optionally specifies an alternate connection pool to use.
 	// If nil, the default is used.
@@ -303,8 +306,10 @@ func ConfigureTransports(t1 *http.Transport) (*Transport, error) {
 func configureTransports(t1 *http.Transport) (*Transport, error) {
 	connPool := new(clientConnPool)
 	t2 := &Transport{
-		ConnPool: noDialClientConnPool{connPool},
-		t1:       t1,
+		ConnPool:          noDialClientConnPool{connPool},
+		t1:                t1,
+		ConnectionFlow:    t1.ConnectionFlow,
+		ConnectionFlowSet: t1.ConnectionFlowSet,
 	}
 
 	connPool.t = t2
@@ -961,7 +966,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 
 	// 2. Determine Connection Flow (default to ~15MB if not set)
 	cc.connFlow = transportDefaultConnFlow
-	if t.ConnectionFlow != 0 {
+	if t.ConnectionFlowSet || t.ConnectionFlow != 0 {
 		cc.connFlow = t.ConnectionFlow
 	}
 
