@@ -30,6 +30,11 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
 
 ## Patches
 
+- **Strict and bounded chunk-size framing** (CVE-2023-39326 and
+  CVE-2025-22871): backport Go's chunk-extension overhead accounting and
+  reject bare LF or embedded CR in chunk-size lines. Preserve ordinary
+  extensions, one-byte streaming, the existing line-size bound and complete
+  body/trailer handling. Tests in `internal/chunked_security_test.go`.
 - **Bounded CONTINUATION processing** (CVE-2023-45288): backport x/net's
   fragment bound, stopping a header block after its field-list limit or an
   invalid field instead of draining unlimited continuations. Multiply the
