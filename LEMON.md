@@ -421,3 +421,8 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   accounting; the final legal odd stream ID is usable once. Initial connection
   WINDOW_UPDATE plus65535 must fit the31-bit limit before preface I/O.
   Browser settings and ordering remain data; tests cover the actual NewClientConn.
+
+- A6 terminal DATA errors close the response pipe even after END_STREAM has
+  retired the stream. Keep the existing connection-level flow error/GOAWAY;
+  this is reader termination, not a new alert policy. Regression covers both
+  terminal states and receive windows0/1 through an actual RoundTrip.

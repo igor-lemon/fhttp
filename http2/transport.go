@@ -2883,10 +2883,20 @@ func (b transportResponseBody) Close() error {
 	return nil
 }
 
-func (rl *clientConnReadLoop) processData(f *DataFrame) error {
+func (rl *clientConnReadLoop) processData(f *DataFrame) (err error) {
 	cc := rl.cc
 	cs := cc.streamByID(f.StreamID, f.StreamEnded())
 	data := f.Data()
+	// END_STREAM removes the stream before publishing its final bytes. If
+	// validation then fails, connection cleanup cannot find this reader; end it
+	// here as well, preserving the original connection error and wire policy.
+	if cs != nil && f.StreamEnded() {
+		defer func() {
+			if err != nil {
+				rl.endStreamError(cs, err)
+			}
+		}()
+	}
 	if cs == nil {
 		cc.mu.Lock()
 		neverSent := cc.nextStreamID
