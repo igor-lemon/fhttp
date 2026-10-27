@@ -955,7 +955,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	// Claiming a larger window than we advertised makes the refresh
 	// threshold below unreachable and stalls the stream forever.
 	cc.streamFlow = initialWindowSize
-	if v, ok := t.Settings[SettingInitialWindowSize]; ok && v != 0 {
+	if v, ok := t.Settings[SettingInitialWindowSize]; ok {
 		cc.streamFlow = v
 	}
 
@@ -969,8 +969,8 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	// SAFETY: Validate flow control values don't exceed int32 max
 	// RFC 7540 Section 6.9.1: Max window size is 2^31-1
 	// ------------------------------------------------------------------
-	if cc.connFlow > math.MaxInt32 {
-		return nil, fmt.Errorf("http2: connection flow control window too large: %d (max: %d)", cc.connFlow, math.MaxInt32)
+	if cc.connFlow > math.MaxInt32-initialWindowSize {
+		return nil, fmt.Errorf("http2: connection flow control window too large: %d (max: %d)", cc.connFlow, math.MaxInt32-initialWindowSize)
 	}
 	if cc.streamFlow > math.MaxInt32 {
 		return nil, fmt.Errorf("http2: stream flow control window too large: %d (max: %d)", cc.streamFlow, math.MaxInt32)
@@ -1194,7 +1194,7 @@ func (cc *ClientConn) idleStateLocked() (st clientConnIdleState) {
 	}
 
 	st.canTakeNewRequest = cc.goAway == nil && !cc.closed && !cc.closing && maxConcurrentOkay &&
-		int64(cc.nextStreamID)+2*int64(cc.pendingRequests) < math.MaxInt32 &&
+		int64(cc.nextStreamID)+2*int64(cc.pendingRequests) <= math.MaxInt32 &&
 		!cc.tooIdleLocked()
 	st.freshConn = cc.nextStreamID == 1 && st.canTakeNewRequest
 
