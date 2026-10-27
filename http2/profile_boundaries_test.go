@@ -1,6 +1,7 @@
 package http2
 
 import (
+	http "github.com/igor-lemon/fhttp"
 	"io"
 	"math"
 	"net"
@@ -50,4 +51,43 @@ func TestProfileConnectionWindowCannotOverflow(t *testing.T) {
 	if err == nil {
 		t.Fatal("connection window overflow accepted")
 	}
+}
+
+func TestExplicitConnectionWindowSurvivesCloneAndConfigure(t *testing.T) {
+	for _, flow := range []uint32{0, 1, math.MaxInt32 - 65535} {
+		t1 := (&http.Transport{ConnectionFlow: flow, ConnectionFlowSet: true}).Clone()
+		t2, err := ConfigureTransports(t1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !t2.ConnectionFlowSet || t2.ConnectionFlow != flow {
+			t.Fatalf("configuration lost: %+v", t2)
+		}
+		a, b := net.Pipe()
+		drained := make(chan struct{})
+		go func() { _, _ = io.Copy(io.Discard, b); close(drained) }()
+		cc, err := t2.NewClientConn(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cc.connFlow != flow {
+			t.Fatalf("configured %d, accounting %d", flow, cc.connFlow)
+		}
+		_ = cc.Close()
+		_ = b.Close()
+		<-drained
+	}
+	a, b := net.Pipe()
+	drained := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, b); close(drained) }()
+	cc, err := (&Transport{}).NewClientConn(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cc.connFlow != transportDefaultConnFlow {
+		t.Fatal("legacy backend default changed", cc.connFlow)
+	}
+	_ = cc.Close()
+	_ = b.Close()
+	<-drained
 }
