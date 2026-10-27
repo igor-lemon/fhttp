@@ -312,6 +312,8 @@ type Transport struct {
 
 	PseudoHeaderOrder []string
 	ConnectionFlow    uint32
+	// ConnectionFlowSet distinguishes an explicit zero from the backend default.
+	ConnectionFlowSet bool
 
 	// ForceAttemptHTTP2 controls whether HTTP/2 is enabled when a non-zero
 	// Dial, DialTLS, or DialContext func or TLSClientConfig is provided.
@@ -369,6 +371,8 @@ func (t *Transport) Clone() *Transport {
 		WriteBufferSize:        t.WriteBufferSize,
 		ReadBufferSize:         t.ReadBufferSize,
 		MaxMergedHeadAndBody:   t.MaxMergedHeadAndBody,
+		ConnectionFlow:         t.ConnectionFlow,
+		ConnectionFlowSet:      t.ConnectionFlowSet,
 	}
 	if t.TLSClientConfig != nil {
 		t2.TLSClientConfig = t.TLSClientConfig.Clone()

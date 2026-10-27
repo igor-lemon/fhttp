@@ -426,3 +426,11 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   retired the stream. Keep the existing connection-level flow error/GOAWAY;
   this is reader termination, not a new alert policy. Regression covers both
   terminal states and receive windows0/1 through an actual RoundTrip.
+
+## A6 explicit zero connection increment
+
+`ConnectionFlowSet` in both transports distinguishes an explicit zero (no
+initial WINDOW_UPDATE) from the unchanged raw-backend default. Clone and
+ConfigureTransports carry the value and its presence; no browser value is
+introduced. profile_boundaries_test.go checks zero, one and maximum increments,
+configuration/clone ownership and the legacy default.
