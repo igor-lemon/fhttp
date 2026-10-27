@@ -434,3 +434,5 @@ initial WINDOW_UPDATE) from the unchanged raw-backend default. Clone and
 ConfigureTransports carry the value and its presence; no browser value is
 introduced. profile_boundaries_test.go checks zero, one and maximum increments,
 configuration/clone ownership and the legacy default.
+
+The inherited reflective Clone fixture now initializes both connection-window fields; their zero values are valid configuration, not evidence that Clone lost them. The unrelated H2transport/PseudoHeaderOrder obligations remain F09 debt.

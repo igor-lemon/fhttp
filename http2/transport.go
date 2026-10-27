@@ -1071,7 +1071,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	// ------------------------------------------------------------------
 	// CRITICAL FIX: Use the sanitized cc.connFlow.
 	// t.ConnectionFlow might be 0, which would send an illegal Window Update of 0.
-	// cc.connFlow is guaranteed to be non-zero (defaults to transportDefaultConnFlow).
+	// Explicit zero sends no update; omitted backend configuration uses its default.
 	// ------------------------------------------------------------------
 	if cc.connFlow > 0 {
 		cc.fr.WriteWindowUpdate(0, cc.connFlow)
