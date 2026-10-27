@@ -115,3 +115,13 @@ func (cc *ClientConn) windowDenominator() int64 {
 	}
 	return int64(behavior.Legacy().Uint("h2.window_update_denominator"))
 }
+
+// refilledConnWindow is what the connection's window is refilled to when the
+// transport tells the peer of what is freed without a delay: the increment
+// it was given, as x/net refills to its own, but never less than RFC 9113's
+// initial 65,535 bytes. An increment under half of that refilled nothing, and
+// one of 0 or 1 left the connection stopped once its first 65,535 bytes came.
+// Requires cc.mu.
+func (cc *ClientConn) refilledConnWindow() int32 {
+	return max(int32(cc.connFlow), initialWindowSize)
+}
