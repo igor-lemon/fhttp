@@ -5892,6 +5892,8 @@ func TestTransportRequestWriteRoundTrip(t *testing.T) {
 
 func TestTransportClone(t *testing.T) {
 	tr := &Transport{
+		ConnectionFlow:         1,
+		ConnectionFlowSet:      true,
 		Proxy:                  func(*Request) (*url.URL, error) { panic("") },
 		DialContext:            func(ctx context.Context, network, addr string) (net.Conn, error) { panic("") },
 		Dial:                   func(network, addr string) (net.Conn, error) { panic("") },
