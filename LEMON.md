@@ -436,3 +436,5 @@ introduced. profile_boundaries_test.go checks zero, one and maximum increments,
 configuration/clone ownership and the legacy default.
 
 The inherited reflective Clone fixture now initializes both connection-window fields; their zero values are valid configuration, not evidence that Clone lost them. The unrelated H2transport/PseudoHeaderOrder obligations remain F09 debt.
+
+A6 production-graph gate (Go1.26.10) corrected only an inherited ContentLength diagnostic from %q to %d; the body-length assertion is unchanged.
