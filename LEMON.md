@@ -416,3 +416,8 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
 - `ProtocolHTTP3` ("h3", 2026-10-25): the protocol quic-go-utls's http3
   asks a request's `HeaderFor` for the header it writes, as HTTP/1.1 and
   HTTP/2 here do.
+
+- A6 HTTP2 boundaries: zero INITIAL_WINDOW_SIZE remains zero in receive
+  accounting; the final legal odd stream ID is usable once. Initial connection
+  WINDOW_UPDATE plus65535 must fit the31-bit limit before preface I/O.
+  Browser settings and ordering remain data; tests cover the actual NewClientConn.
