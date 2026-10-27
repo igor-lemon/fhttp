@@ -39,7 +39,8 @@ type chunkedReader struct {
 	n        uint64 // unread bytes in chunk
 	err      error
 	buf      [2]byte
-	checkEnd bool // whether need to check for \r\n chunk footer
+	checkEnd bool  // whether need to check for \r\n chunk footer
+	excess   int64 // excessive chunk framing relative to useful data
 }
 
 func (cr *chunkedReader) beginChunk() {
@@ -49,9 +50,24 @@ func (cr *chunkedReader) beginChunk() {
 	if cr.err != nil {
 		return
 	}
+	cr.excess += int64(len(line)) + 2
+	line = trimTrailingWhitespace(line)
+	line, cr.err = removeChunkExtension(line)
+	if cr.err != nil {
+		return
+	}
 	cr.n, cr.err = parseHexUint(line)
 	if cr.err != nil {
 		return
+	}
+	// Backport Go's resource bound: permit one-byte streaming and normal
+	// extensions, but reject an arbitrarily large framing-to-data ratio.
+	cr.excess -= 16 + 2*int64(cr.n)
+	if cr.excess < 0 {
+		cr.excess = 0
+	}
+	if cr.excess > 16*1024 {
+		cr.err = errors.New("chunked encoding contains too much non-data")
 	}
 	if cr.n == 0 {
 		cr.err = io.EOF
@@ -133,12 +149,14 @@ func readChunkLine(b *bufio.Reader) ([]byte, error) {
 	if len(p) >= maxLineLength {
 		return nil, ErrLineTooLong
 	}
-	p = trimTrailingWhitespace(p)
-	p, err = removeChunkExtension(p)
-	if err != nil {
-		return nil, err
+	// Header-line tolerance does not apply to chunk-size lines (RFC 9112).
+	// Require one final CRLF, with no embedded CR before it.
+	if idx := bytes.IndexByte(p, '\r'); idx == -1 {
+		return nil, errors.New("chunked line ends with bare LF")
+	} else if idx != len(p)-2 {
+		return nil, errors.New("invalid CR in chunked line")
 	}
-	return p, nil
+	return p[:len(p)-2], nil
 }
 
 func trimTrailingWhitespace(b []byte) []byte {
@@ -154,10 +172,11 @@ func isASCIISpace(b byte) bool {
 
 // removeChunkExtension removes any chunk-extension from p.
 // For example,
-//     "0" => "0"
-//     "0;token" => "0"
-//     "0;token=val" => "0"
-//     `0;token="quoted string"` => "0"
+//
+//	"0" => "0"
+//	"0;token" => "0"
+//	"0;token=val" => "0"
+//	`0;token="quoted string"` => "0"
 func removeChunkExtension(p []byte) ([]byte, error) {
 	semi := bytes.IndexByte(p, ';')
 	if semi == -1 {
