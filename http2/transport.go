@@ -2795,10 +2795,9 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 		now := timeNow()
 		connAdd = cc.freedOfConn(int32(n), now)
 		streamAdd = cc.freedOfStream(cs, int32(n), now)
-	} else if v := cc.inflow.available(); v < int32(cc.connFlow/2) {
+	} else if target, v := cc.refilledConnWindow(), cc.inflow.available(); v < target/2 {
 		// Check the conn-level first, before the stream-level.
-		// Use dynamic connFlow logic
-		connAdd = int32(cc.connFlow) - v
+		connAdd = target - v
 		cc.inflow.add(connAdd)
 	}
 

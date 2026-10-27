@@ -438,3 +438,13 @@ configuration/clone ownership and the legacy default.
 The inherited reflective Clone fixture now initializes both connection-window fields; their zero values are valid configuration, not evidence that Clone lost them. The unrelated H2transport/PseudoHeaderOrder obligations remain F09 debt.
 
 A6 production-graph gate (Go1.26.10) corrected only an inherited ContentLength diagnostic from %q to %d; the body-length assertion is unchanged.
+
+## Small connection increments refill
+
+Without `WindowUpdateDelay`, the connection's window is refilled once less
+than half of `max(ConnectionFlow, 65535)` is left, back to that size. The
+x/net rule refilled to the increment alone, which never fired for 0 (an
+explicit zero since A6) or 1: the connection stopped after its first 65,535
+bytes. Increments of 65,535 and more refill as before; the Chrome delay rule
+is unchanged. connection_window_test.go reads 256 KiB through an actual
+RoundTrip at increments 0, 1, 1000, 65535 and 15663105.
