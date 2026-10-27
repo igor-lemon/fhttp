@@ -11,6 +11,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func TestChunk(t *testing.T) {
@@ -152,6 +153,7 @@ func TestParseHexUint(t *testing.T) {
 		{"00000000000000000", 0, "http chunk length too large"}, // could accept if we wanted
 		{"10000000000000000", 0, "http chunk length too large"},
 		{"00000000000000001", 0, "http chunk length too large"}, // could accept if we wanted
+		{"", 0, "empty hex number for chunk length"},
 	}
 	for i := uint64(0); i <= 1234; i++ {
 		tests = append(tests, testCase{in: fmt.Sprintf("%x", i), want: i})
@@ -210,4 +212,41 @@ func TestChunkReadPartial(t *testing.T) {
 		t.Fatalf("second read = %v; want malformed error", err)
 	}
 
+}
+
+// Issue 48861: ChunkedReader should report incomplete chunks
+func TestIncompleteChunk(t *testing.T) {
+	const valid = "4\r\nabcd\r\n" + "5\r\nabc\r\n\r\n" + "0\r\n"
+
+	for i := 0; i < len(valid); i++ {
+		incomplete := valid[:i]
+		r := NewChunkedReader(strings.NewReader(incomplete))
+		if _, err := io.ReadAll(r); err != io.ErrUnexpectedEOF {
+			t.Errorf("expected io.ErrUnexpectedEOF for %q, got %v", incomplete, err)
+		}
+	}
+
+	r := NewChunkedReader(strings.NewReader(valid))
+	if _, err := io.ReadAll(r); err != nil {
+		t.Errorf("unexpected error for %q: %v", valid, err)
+	}
+}
+
+func TestChunkEndReadError(t *testing.T) {
+	readErr := fmt.Errorf("chunk end read error")
+
+	r := NewChunkedReader(io.MultiReader(strings.NewReader("4\r\nabcd"), iotest.ErrReader(readErr)))
+	if _, err := io.ReadAll(r); err != readErr {
+		t.Errorf("expected %v, got %v", readErr, err)
+	}
+}
+
+// An empty chunk-size line is no last chunk: Go and Chrome refuse it, and
+// taking it for one cut the body short where it stood.
+func TestChunkEmptySizeLine(t *testing.T) {
+	r := NewChunkedReader(strings.NewReader("5\r\nhello\r\n\r\n5\r\nworld\r\n0\r\n\r\n"))
+	got, err := io.ReadAll(r)
+	if err == nil || !strings.Contains(err.Error(), "empty hex number for chunk length") {
+		t.Fatalf("read %q, %v; want the empty size refused", got, err)
+	}
 }

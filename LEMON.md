@@ -448,3 +448,15 @@ explicit zero since A6) or 1: the connection stopped after its first 65,535
 bytes. Increments of 65,535 and more refill as before; the Chrome delay rule
 is unchanged. connection_window_test.go reads 256 KiB through an actual
 RoundTrip at increments 0, 1, 1000, 65535 and 15663105.
+
+## Empty and cut chunked framing (review problem 9)
+
+`parseHexUint` took an empty chunk-size line for the last chunk, so a body
+"5\r\nhello\r\n\r\n..." ended at "hello" with no error, where Go 1.26.10
+says "empty hex number for chunk length" and Chrome refuses the framing.
+Go's two other conversions came with it: a chunk cut short in its data, and
+one whose CRLF never came, are io.ErrUnexpectedEOF, not io.EOF (Issue 48861):
+the transport's trailer read caught them over a connection, a reader built
+with NewChunkedReader did not. TestParseHexUint's empty row,
+TestIncompleteChunk and TestChunkEndReadError are Go's own, and
+TestChunkEmptySizeLine the body that stopped short.

@@ -97,6 +97,11 @@ func (cr *chunkedReader) Read(b []uint8) (n int, err error) {
 					cr.err = errors.New("malformed chunked encoding")
 					break
 				}
+			} else {
+				if cr.err == io.EOF {
+					cr.err = io.ErrUnexpectedEOF
+				}
+				break
 			}
 			cr.checkEnd = false
 		}
@@ -125,6 +130,8 @@ func (cr *chunkedReader) Read(b []uint8) (n int, err error) {
 		// bytes to verify they are "\r\n".
 		if cr.n == 0 && cr.err == nil {
 			cr.checkEnd = true
+		} else if cr.err == io.EOF {
+			cr.err = io.ErrUnexpectedEOF
 		}
 	}
 	return n, cr.err
@@ -253,6 +260,9 @@ type FlushAfterChunkWriter struct {
 }
 
 func parseHexUint(v []byte) (n uint64, err error) {
+	if len(v) == 0 {
+		return 0, errors.New("empty hex number for chunk length")
+	}
 	for i, b := range v {
 		switch {
 		case '0' <= b && b <= '9':
