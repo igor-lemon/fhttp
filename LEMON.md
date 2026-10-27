@@ -30,6 +30,13 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
 
 ## Patches
 
+- **Sensitive headers stay removed across redirects** (CVE-2024-45336 and
+  CVE-2025-4673): remember when a chain leaves its initial trusted destination
+  and never restore caller credentials on subsequent same-host or return hops.
+  Include `Proxy-Authorization` and `Proxy-Authenticate` among sensitive fields.
+  Preserve the low-level client's trusted-subdomain contract and independent
+  jar selection; tls-forge enforces its stricter origin boundary separately.
+  Tests in `redirect_security_test.go`, plus the existing redirect suite.
 - **Strict and bounded chunk-size framing** (CVE-2023-39326 and
   CVE-2025-22871): backport Go's chunk-extension overhead accounting and
   reject bare LF or embedded CR in chunk-size lines. Preserve ordinary
