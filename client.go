@@ -756,8 +756,9 @@ func (c *Client) makeHeadersCopier(ireq *Request) func(*Request) {
 	// The headers to copy are from the very initial request.
 	// We use a closured callback to keep a reference to these original headers.
 	var (
-		ireqhdr  = cloneOrMakeHeader(ireq.Header)
-		icookies map[string][]*Cookie
+		ireqhdr               = cloneOrMakeHeader(ireq.Header)
+		icookies              map[string][]*Cookie
+		stripSensitiveHeaders bool
 	)
 	if c.Jar != nil && ireq.Header.Get("Cookie") != "" {
 		icookies = make(map[string][]*Cookie)
@@ -766,8 +767,12 @@ func (c *Client) makeHeadersCopier(ireq *Request) func(*Request) {
 		}
 	}
 
-	preq := ireq // The previous request
 	return func(req *Request) {
+		// Once the chain leaves the initial request's trusted destination,
+		// never restore its credentials on later same-host or return hops.
+		if !shouldCopySensitiveHeadersOnRedirect(ireq.URL, req.URL) {
+			stripSensitiveHeaders = true
+		}
 		// If Jar is present and there was some initial cookies provided
 		// via the request header, then we may need to alter the initial
 		// cookies as we follow redirects since each redirect may end up
@@ -804,12 +809,10 @@ func (c *Client) makeHeadersCopier(ireq *Request) func(*Request) {
 		// Copy the initial request's Header Values
 		// (at least the safe ones).
 		for k, vv := range ireqhdr {
-			if shouldCopyHeaderOnRedirect(k, preq.URL, req.URL) {
+			if !stripSensitiveHeaders || !sensitiveRedirectHeader(k) {
 				req.Header[k] = vv
 			}
 		}
-
-		preq = req // Update previous Request with the current request
 	}
 }
 
@@ -972,27 +975,34 @@ func (b *cancelTimerBody) Close() error {
 }
 
 func shouldCopyHeaderOnRedirect(headerKey string, initial, dest *url.URL) bool {
+	return !sensitiveRedirectHeader(headerKey) || shouldCopySensitiveHeadersOnRedirect(initial, dest)
+}
+
+func sensitiveRedirectHeader(headerKey string) bool {
 	switch CanonicalHeaderKey(headerKey) {
-	case "Authorization", "Www-Authenticate", "Cookie", "Cookie2":
-		// Permit sending auth/cookie headers from "foo.com"
-		// to "sub.foo.com".
-
-		// Note that we don't send all cookies to subdomains
-		// automatically. This function is only used for
-		// Cookies set explicitly on the initial outgoing
-		// client request. Cookies automatically added via the
-		// CookieJar mechanism continue to follow each
-		// cookie's scope as set by Set-Cookie. But for
-		// outgoing requests with the Cookie header set
-		// directly, we don't know their scope, so we assume
-		// it's for *.domain.com.
-
-		ihost := canonicalAddr(initial)
-		dhost := canonicalAddr(dest)
-		return isDomainOrSubdomain(dhost, ihost)
+	case "Authorization", "Www-Authenticate", "Cookie", "Cookie2", "Proxy-Authorization", "Proxy-Authenticate":
+		return true
 	}
-	// All other headers are copied:
-	return true
+	return false
+}
+
+func shouldCopySensitiveHeadersOnRedirect(initial, dest *url.URL) bool {
+	// Permit sending auth/cookie headers from "foo.com"
+	// to "sub.foo.com".
+
+	// Note that we don't send all cookies to subdomains
+	// automatically. This function is only used for
+	// Cookies set explicitly on the initial outgoing
+	// client request. Cookies automatically added via the
+	// CookieJar mechanism continue to follow each
+	// cookie's scope as set by Set-Cookie. But for
+	// outgoing requests with the Cookie header set
+	// directly, we don't know their scope, so we assume
+	// it's for *.domain.com.
+
+	ihost := canonicalAddr(initial)
+	dhost := canonicalAddr(dest)
+	return isDomainOrSubdomain(dhost, ihost)
 }
 
 // isDomainOrSubdomain reports whether sub is a subdomain (or exact
