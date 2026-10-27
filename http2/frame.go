@@ -1627,6 +1627,7 @@ func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
 		if size > remainSize {
 			hdec.SetEmitEnabled(false)
 			mf.Truncated = true
+			remainSize = 0
 			return
 		}
 		remainSize -= size
@@ -1638,6 +1639,12 @@ func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
 	var hc = cont
 	for {
 		frag := hc.HeaderBlockFragment()
+		// Backport x/net's CONTINUATION bound: do not continue parsing data
+		// after the field-list budget is exhausted or a field is invalid.
+		// Widen before multiplying, since the SETTINGS limit is a uint32.
+		if uint64(len(frag)) > 2*uint64(remainSize) || invalid != nil {
+			return nil, ConnectionError(ErrCodeProtocol)
+		}
 		if _, err := hdec.Write(frag); err != nil {
 			return nil, ConnectionError(ErrCodeCompression)
 		}

@@ -30,6 +30,13 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
 
 ## Patches
 
+- **Bounded CONTINUATION processing** (CVE-2023-45288): backport x/net's
+  fragment bound, stopping a header block after its field-list limit or an
+  invalid field instead of draining unlimited continuations. Multiply the
+  uint32 limit after widening. Complete truncated blocks keep their stream
+  semantics; a malformed continuation ends the connection. Framer and real
+  transport controls are in `http2/continuation_limit_test.go`; ordinary
+  request cancellation still preserves other healthy streams.
 - **Bounded decoding of a fragmented literal** (CVE-2022-41723): backport
   x/net's deferred string decoding. Parse the encoded name and value extents
   before decoding either, so each additional value byte cannot decompress the
