@@ -460,3 +460,13 @@ the transport's trailer read caught them over a connection, a reader built
 with NewChunkedReader did not. TestParseHexUint's empty row,
 TestIncompleteChunk and TestChunkEndReadError are Go's own, and
 TestChunkEmptySizeLine the body that stopped short.
+
+## TestCancelRequestWhenSharingConnection as Go 1.26.10 has it
+
+The fork's version ran ten loops of requests canceled as they were made, for
+10 s: on a Mac they left 16,308 connections in TIME_WAIT, every ephemeral port,
+and failed with "can't assign requested address", the http2 and cookiejar
+tests the gate runs next with them (twice on 2026-10-28, aa8d85b and 9129cb4
+alike, the test alone on a cooled machine too). Go's is deterministic: the one
+connection held through PutIdleConn, a second request waiting for it canceled,
+and the first one unharmed; 20 runs, TIME_WAIT 4 before and after.
