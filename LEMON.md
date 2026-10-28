@@ -490,3 +490,15 @@ the field and not its value, as x/net's does: the value may be sensitive
 flood that reached its deadline before) and `h2_bundle_headerblock_test.go`;
 `hpack/fragmented_literal_test.go` holds the deferred decoding to a time too
 (250 ms; 1.08 s before the backport, under 1 ms after, 31 ms under -race).
+
+## Credentials kept to their origin (review A1, S04)
+
+`WithCredentialsKeptToOrigin(ctx)`: a request made with such a context has its
+credentials (the fields `sensitiveRedirectHeader` names) copied onto the hops
+of its redirects only while they stay at its origin, its scheme, host in any
+case and port, and onto none after a hop elsewhere. Without it they go on to a
+subdomain of its host too, as net/http's do. tls-forge gives it to every
+request, so that a redirect policy given in place of its own copies no
+caller's credentials to a subdomain, nor back to the origin after one. Tests
+in `redirect_security_test.go` (`TestRedirectCredentialsKeptToTheirOrigin`:
+before the copier read it, a subdomain kept them and so did the hop back).

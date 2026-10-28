@@ -770,7 +770,7 @@ func (c *Client) makeHeadersCopier(ireq *Request) func(*Request) {
 	return func(req *Request) {
 		// Once the chain leaves the initial request's trusted destination,
 		// never restore its credentials on later same-host or return hops.
-		if !shouldCopySensitiveHeadersOnRedirect(ireq.URL, req.URL) {
+		if !credentialsGoTo(ireq, req.URL) {
 			stripSensitiveHeaders = true
 		}
 		// If Jar is present and there was some initial cookies provided
