@@ -31,7 +31,9 @@ func TestSplitLiteralHasBoundedDecodingCost(t *testing.T) {
 		return
 	}
 
-	want := HeaderField{Name: strings.Repeat("a", 128<<10), Value: strings.Repeat("v", 2000)}
+	// Measured on an M-series Mac: the quadratic decoder took 1.08 s for
+	// these 3500 fragments, the fixed one 0.44 ms (32 ms under -race).
+	want := HeaderField{Name: strings.Repeat("a", 128<<10), Value: strings.Repeat("v", 4000)}
 	var encoded bytes.Buffer
 	if err := NewEncoder(&encoded).WriteField(want); err != nil {
 		t.Fatal(err)
@@ -62,11 +64,15 @@ func TestSplitLiteralHasBoundedDecodingCost(t *testing.T) {
 	if err := d.Close(); err != nil {
 		t.Fatal(err)
 	}
+	elapsed := time.Since(started)
 	runtime.ReadMemStats(&after)
 	allocated := after.TotalAlloc - before.TotalAlloc
-	t.Logf("decoded %d fragments in %v, allocated %d bytes", len(wire)-cut, time.Since(started), allocated)
+	t.Logf("decoded %d fragments in %v, allocated %d bytes", len(wire)-cut, elapsed, allocated)
 	if count != 1 {
 		t.Fatalf("emitted %d fields, want 1", count)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("fragmented literal took %v to decode, limit %v", elapsed, 250*time.Millisecond)
 	}
 	if allocated > 16<<20 {
 		t.Fatalf("fragmented literal allocated %d bytes, limit %d", allocated, 16<<20)

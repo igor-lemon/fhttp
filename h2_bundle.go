@@ -1226,7 +1226,7 @@ func (e http2headerFieldNameError) Error() string {
 type http2headerFieldValueError string
 
 func (e http2headerFieldValueError) Error() string {
-	return fmt.Sprintf("invalid header field value %q", string(e))
+	return fmt.Sprintf("invalid header field value for %q", string(e))
 }
 
 var (
@@ -2925,7 +2925,8 @@ func (fr *http2Framer) readMetaFrame(cont http2continuable) (http2Frame, error) 
 			fr.debugReadLoggerf("http2: decoded hpack field %+v", hf)
 		}
 		if !httpguts.ValidHeaderFieldValue(hf.Value) {
-			invalid = http2headerFieldValueError(hf.Value)
+			// Don't include the value in the error, because it may be sensitive.
+			invalid = http2headerFieldValueError(hf.Name)
 		}
 		isPseudo := strings.HasPrefix(hf.Name, ":")
 		if isPseudo {
@@ -2949,7 +2950,7 @@ func (fr *http2Framer) readMetaFrame(cont http2continuable) (http2Frame, error) 
 		if size > remainSize {
 			hdec.SetEmitEnabled(false)
 			mf.Truncated = true
-
+			remainSize = 0
 			return
 		}
 		remainSize -= size
@@ -2958,9 +2959,21 @@ func (fr *http2Framer) readMetaFrame(cont http2continuable) (http2Frame, error) 
 	})
 	// Lose reference to metaFrame:
 	defer hdec.SetEmitFunc(func(hf hpack.HeaderField) {})
+	// The block is bounded on the wire as well, frame headers included, at
+	// twice the field list: CONTINUATION frames that carry nothing, and
+	// fragments that only update the table's size, emit no field.
+	wireBudget := 2 * uint64(fr.maxHeaderListSize())
+	var wire uint64
 	var hc = cont
 	for {
 		frag := hc.HeaderBlockFragment()
+		wire += http2frameHeaderLen + uint64(len(frag))
+		// x/net's CONTINUATION bound (CVE-2023-45288): do not continue parsing
+		// data after the field-list budget is exhausted or a field is invalid.
+		// Widen before multiplying, since the SETTINGS limit is a uint32.
+		if uint64(len(frag)) > 2*uint64(remainSize) || invalid != nil || wire > wireBudget {
+			return nil, http2ConnectionError(http2ErrCodeProtocol)
+		}
 		if _, err := hdec.Write(frag); err != nil {
 			return nil, http2ConnectionError(http2ErrCodeCompression)
 		}

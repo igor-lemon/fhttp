@@ -1604,7 +1604,8 @@ func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
 			fr.debugReadLoggerf("http2: decoded hpack field %+v", hf)
 		}
 		if !httpguts.ValidHeaderFieldValue(hf.Value) {
-			invalid = headerFieldValueError(hf.Value)
+			// Don't include the value in the error, because it may be sensitive.
+			invalid = headerFieldValueError(hf.Name)
 		}
 		isPseudo := strings.HasPrefix(hf.Name, ":")
 		if isPseudo {
@@ -1636,13 +1637,19 @@ func (fr *Framer) readMetaFrame(cont continuable) (Frame, error) {
 	})
 	// Lose reference to metaFrame:
 	defer hdec.SetEmitFunc(func(hf hpack.HeaderField) {})
+	// The block is bounded on the wire as well, frame headers included, at
+	// twice the field list: CONTINUATION frames that carry nothing, and
+	// fragments that only update the table's size, emit no field.
+	wireBudget := 2 * uint64(fr.maxHeaderListSize())
+	var wire uint64
 	var hc = cont
 	for {
 		frag := hc.HeaderBlockFragment()
+		wire += frameHeaderLen + uint64(len(frag))
 		// Backport x/net's CONTINUATION bound: do not continue parsing data
 		// after the field-list budget is exhausted or a field is invalid.
 		// Widen before multiplying, since the SETTINGS limit is a uint32.
-		if uint64(len(frag)) > 2*uint64(remainSize) || invalid != nil {
+		if uint64(len(frag)) > 2*uint64(remainSize) || invalid != nil || wire > wireBudget {
 			return nil, ConnectionError(ErrCodeProtocol)
 		}
 		if _, err := hdec.Write(frag); err != nil {
