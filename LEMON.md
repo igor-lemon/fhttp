@@ -470,3 +470,23 @@ tests the gate runs next with them (twice on 2026-10-28, aa8d85b and 9129cb4
 alike, the test alone on a cooled machine too). Go's is deterministic: the one
 connection held through PutIdleConn, a second request waiting for it canceled,
 and the first one unharmed; 20 runs, TIME_WAIT 4 before and after.
+
+## A header block bounded on the wire too (review A1)
+
+x/net's CVE-2023-45288 bound counts the fragments of a header block against
+what is left of the field list, and a fragment that emits no field spends
+none of it: empty CONTINUATION frames, and fragments of nothing but dynamic
+table size updates, were read for as long as a server sent them. A block is
+now bounded on the wire as well, at twice MAX_HEADER_LIST_SIZE, each frame's
+nine-byte header counted, and past it the connection ends with
+PROTOCOL_ERROR. A block of one-byte frames within it is read as before.
+`h2_bundle.go`, the bundled HTTP/2 of the Server and of a Transport left to
+set HTTP/2 up itself, had a framer without the CVE-2023-45288 fix at all: it
+read a whole flood. It has x/net's bound, the wire bound and `remainSize`
+spent on truncation, as `http2/frame.go` has. An invalid field's error names
+the field and not its value, as x/net's does: the value may be sensitive
+(`invalid header field value for "x-token"`). Tests in
+`http2/continuation_limit_test.go` (a transport against an empty-CONTINUATION
+flood that reached its deadline before) and `h2_bundle_headerblock_test.go`;
+`hpack/fragmented_literal_test.go` holds the deferred decoding to a time too
+(250 ms; 1.08 s before the backport, under 1 ms after, 31 ms under -race).
