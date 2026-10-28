@@ -6463,6 +6463,10 @@ func TestErrorWriteLoopRace(t *testing.T) {
 // Issue 41600
 // Test that a new request which uses the connection of an active request
 // cannot cause it to be canceled as well.
+// Go 1.26.10's: a request that waits for the one connection and is canceled
+// leaves the request that holds it alone. The version before ran ten loops of
+// canceled requests for 10 s, which took every ephemeral port a Mac has
+// (16,308 in TIME_WAIT) and failed the tests run after it.
 func TestCancelRequestWhenSharingConnection(t *testing.T) {
 	reqc := make(chan chan struct{}, 2)
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, req *Request) {
