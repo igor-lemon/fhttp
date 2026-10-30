@@ -233,6 +233,10 @@ func TestEnablePush(t *testing.T) {
 		}
 		io.WriteString(w, "owned "+r.Method)
 	}))
+	if err := http2.ConfigureServer(peer.Config, &http2.Server{}); err != nil {
+		t.Fatal(err)
+	}
+	peer.TLS = peer.Config.TLSConfig
 	peer.EnableHTTP2 = true
 	peer.StartTLS()
 	defer peer.Close()

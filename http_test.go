@@ -8,10 +8,12 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"net/url"
 	"os/exec"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/igor-lemon/fhttp/internal/testenv"
 )
@@ -115,9 +117,13 @@ func TestOmitHTTP2(t *testing.T) {
 	}
 	t.Parallel()
 	goTool := testenv.GoToolPath(t)
-	out, err := exec.Command(goTool, "test", "-short", "-tags=nethttpomithttp2", "net/http").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	// Compile the actual fork. The owned tagged runtime witness is run by
+	// the gate separately, preserving the45second root-suite isolation.
+	out, err := exec.CommandContext(ctx, goTool, "build", "-tags=nethttpomithttp2", "./...").CombinedOutput()
 	if err != nil {
-		t.Fatalf("go test -short failed: %v, %s", err, out)
+		t.Fatalf("tagged fork build failed: %v, %s", err, out)
 	}
 }
 
@@ -127,7 +133,9 @@ func TestOmitHTTP2(t *testing.T) {
 func TestOmitHTTP2Vet(t *testing.T) {
 	t.Parallel()
 	goTool := testenv.GoToolPath(t)
-	out, err := exec.Command(goTool, "vet", "-tags=nethttpomithttp2", "net/http").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, goTool, "vet", "-tags=nethttpomithttp2", "./...").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go vet failed: %v, %s", err, out)
 	}
