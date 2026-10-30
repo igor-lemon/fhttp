@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-// A User-Agent set to the empty string means none is sent, as in net/http and
-// as the HTTP/2 path here already does. Over HTTP/1.1 it went out as an empty
-// "User-Agent:" line.
-func TestRequestWriteOmitsAnEmptyUserAgent(t *testing.T) {
+// [fhttp] Over HTTP/1.1 a User-Agent with no value writes none, and one set
+// to the empty string goes out as given, an empty "User-Agent:" line: this
+// fork's raw User-Agent contract (A11), where upstream (#28) writes none of it.
+func TestRequestWriteOmitsAUserAgentWithNoValue(t *testing.T) {
 	write := func(t *testing.T, header Header) string {
 		t.Helper()
 		req := &Request{
@@ -30,11 +30,15 @@ func TestRequestWriteOmitsAnEmptyUserAgent(t *testing.T) {
 	}
 
 	for _, key := range []string{"User-Agent", "user-agent"} {
-		for _, values := range [][]string{{""}, nil} {
+		for _, values := range [][]string{nil, {}} {
 			got := write(t, Header{key: values})
 			if strings.Contains(strings.ToLower(got), "user-agent") {
 				t.Errorf("%s set to %q still wrote a User-Agent:\n%s", key, values, got)
 			}
+		}
+		got := write(t, Header{key: {""}})
+		if strings.Count(got, key+": \r\n") != 1 || strings.Count(strings.ToLower(got), "user-agent") != 1 {
+			t.Errorf("%s set to the empty string was not written once as given:\n%s", key, got)
 		}
 	}
 

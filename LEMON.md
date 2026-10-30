@@ -557,3 +557,12 @@ writeHeader tracing is unchanged. An independent complete trace-to-wire map
 comparison proved duplicate Connection/Content-Length events before correction;
 it also requires all caller/framing/trailer fields so missing events fail.
 Original close/header/log controls plus this witness passed20race repetitions.
+
+## A11 header state and raw User-Agent fixture
+
+Header.Clone preserves absent, nil and explicit-empty entries separately and
+copies value storage. The independent nil/empty/absent regression catches the
+old conversion of nil into empty. H1's fixture now checks fhttp's existing raw
+multi-value/empty User-Agent contract, not net/http's first-value projection;
+H2's original exact expectations remain. Both also assert caller immutability.
+All20race repetitions pass. No browser profile value or dispatch was added.
