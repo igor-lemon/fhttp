@@ -7189,12 +7189,38 @@ func http2ConfigureTransports(t1 *Transport) (*http2Transport, error) {
 	return http2configureTransports(t1)
 }
 
-func http2configureTransports(t1 *Transport) (*http2Transport, error) {
-	connPool := new(http2clientConnPool)
-	t2 := &http2Transport{
-		ConnPool: http2noDialClientConnPool{connPool},
-		t1:       t1,
+// CloneFor binds copied bundled HTTP/2 configuration to a fresh owner.
+func (t *http2Transport) CloneFor(owner *Transport) {
+	c := &http2Transport{
+		AllowHTTP:                  t.AllowHTTP,
+		DialTLS:                    t.DialTLS,
+		DisableCompression:         t.DisableCompression,
+		HeaderTableSize:            t.HeaderTableSize,
+		InitialWindowSize:          t.InitialWindowSize,
+		MaxHeaderListSize:          t.MaxHeaderListSize,
+		PingTimeout:                t.PingTimeout,
+		PushHandler:                t.PushHandler,
+		ReadIdleTimeout:            t.ReadIdleTimeout,
+		StrictMaxConcurrentStreams: t.StrictMaxConcurrentStreams,
+		Settings:                   append([]http2Setting(nil), t.Settings...),
 	}
+	if t.TLSClientConfig != nil {
+		c.TLSClientConfig = t.TLSClientConfig.Clone()
+	}
+	if _, err := http2configureOwnedTransport(owner, c); err != nil {
+		panic("http2: fresh clone owner already has a protocol registration")
+	}
+	owner.H2transport = c
+}
+
+func http2configureTransports(t1 *Transport) (*http2Transport, error) {
+	return http2configureOwnedTransport(t1, &http2Transport{})
+}
+
+func http2configureOwnedTransport(t1 *Transport, t2 *http2Transport) (*http2Transport, error) {
+	connPool := new(http2clientConnPool)
+	t2.ConnPool = http2noDialClientConnPool{connPool}
+	t2.t1 = t1
 
 	connPool.t = t2
 	if err := http2registerHTTPSProtocol(t1, http2noDialH2RoundTripper{t2}); err != nil {

@@ -572,3 +572,16 @@ a known in-memory NopCloser shares the connection buffer with its complete body;
 an unknown reader still flushes the complete head before its body. The30KB head
 continues to cross the4KB buffer. The assertions compare all body bytes and
 write boundaries;20race repetitions pass.
+
+## A11 configured transport Clone
+
+Clone copies pseudo-header order and rebuilds configured H2 transport state:
+policy/maps/slices/priority pointers are copied, connection pools/locks and
+transport-owned TLS upgrade closures are new. Caller-owned function and push
+callbacks retain their identity. Implicit bundled initialization stays lazy,
+preserving a nil TLSNextProto. The H2 owner adapter now requires CloneFor so an
+opaque close-only handle cannot silently substitute shared internal state.
+The original reflective fixture initializes the added configuration fields and
+still checks every exported field.20race repeats pass. Independent configured
+H2 wire tests (20race) require two actual connections, deep policy isolation,
+and that closing the clone leaves the original's live connection usable.

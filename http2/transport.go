@@ -304,13 +304,13 @@ func ConfigureTransports(t1 *http.Transport) (*Transport, error) {
 }
 
 func configureTransports(t1 *http.Transport) (*Transport, error) {
+	return configureOwnedTransport(t1, &Transport{ConnectionFlow: t1.ConnectionFlow, ConnectionFlowSet: t1.ConnectionFlowSet})
+}
+
+func configureOwnedTransport(t1 *http.Transport, t2 *Transport) (*Transport, error) {
 	connPool := new(clientConnPool)
-	t2 := &Transport{
-		ConnPool:          noDialClientConnPool{connPool},
-		t1:                t1,
-		ConnectionFlow:    t1.ConnectionFlow,
-		ConnectionFlowSet: t1.ConnectionFlowSet,
-	}
+	t2.ConnPool = noDialClientConnPool{connPool}
+	t2.t1 = t1
 
 	connPool.t = t2
 	if err := registerHTTPSProtocol(t1, noDialH2RoundTripper{t2}); err != nil {
