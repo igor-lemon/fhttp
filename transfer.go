@@ -272,8 +272,9 @@ func (t *transferWriter) shouldSendContentLength() bool {
 	return t.policy.SendContentLength(t.Method, t.ContentLength, t.bodyProvided, isIdentity(t.TransferEncoding))
 }
 
-// addHeaders adds transfer headers to an existing header object
-func (t *transferWriter) addHeaders(hdrs *Header, trace *httptrace.ClientTrace) error {
+// addHeaders constructs transfer fields. header.write emits their trace events
+// when it serializes them, exactly once alongside all other fields.
+func (t *transferWriter) addHeaders(hdrs *Header) error {
 	if t.Close && !headerHasToken(t.Header, "Connection", "close") {
 		hdrs.Add("Connection", "close")
 	}

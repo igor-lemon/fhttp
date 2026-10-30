@@ -661,7 +661,12 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	if err != nil {
 		return err
 	}
-	err = tw.addHeaders(&header, trace)
+	if len(policies) > 0 {
+		tw.policy = policies[0]
+	}
+	tw.bodyProvided = r.Body != nil
+	tw.Header = header
+	err = tw.addHeaders(&header)
 	if err != nil {
 		return err
 	}
