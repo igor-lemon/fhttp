@@ -170,8 +170,9 @@ type Request struct {
 	// HeaderFor, when set, gives the header the request is written with
 	// once the transport knows the protocol its connection speaks, in place
 	// of Header: protocol is ProtocolHTTP1 or ProtocolHTTP2, header is
-	// Header as the client left it, its jar's cookies in it, and nil is
-	// Header itself. What the transport decides about the request from
+	// a mutable copy of Header as the client left it, its jar's cookies in
+	// it; a nil result selects that copy. The transport does not mutate the
+	// callback argument or its returned map after the callback. What the transport decides about the request from
 	// then on, it decides on the header written, to which it adds what it
 	// would add to Header. Write and WriteProxy write the ProtocolHTTP1
 	// one. A redirect's request has none: the client makes it anew.
@@ -633,32 +634,24 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		w = bw
 	}
 
-	_, err = fmt.Fprintf(w, "%s %s HTTP/1.1\r\n", valueOrDefault(r.Method, "GET"), ruri)
-	if err != nil {
-		return err
-	}
-
-	// Host and User-Agent are written through the header map (so that they
-	// participate in the configured header order), which means the map has
-	// to exist: a zero-value Request has a nil Header.
-	if r.Header == nil {
-		r.Header = make(Header)
-	}
+	// Generated fields belong to this serialization, never the caller's map
+	// or a HeaderFor result that may be reused by another request.
 	header := r.WrittenHeader(ProtocolHTTP1)
-
-	if _, ok := header["Host"]; !ok {
-		if _, ok := header["host"]; !ok {
-			header.Set("Host", host)
-		}
+	if header == nil {
+		header = make(Header)
 	}
 
-	// if user agent field is not present, add it
-	if uaCap, uaLow := header["User-Agent"], header["user-agent"]; uaCap == nil && uaLow == nil {
+	if !hasHeaderName(header, "Host") {
+		header.Set("Host", host)
+	}
+	if !hasHeaderName(header, "User-Agent") {
 		header.Set("User-Agent", "Go-http-client/1.1")
 	}
 
 	// Process Body,ContentLength,Close,Trailer
-	tw, err := newTransferWriter(r)
+	wireRequest := *r
+	wireRequest.Header = header
+	tw, err := newTransferWriter(&wireRequest)
 	if err != nil {
 		return err
 	}
@@ -672,12 +665,23 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		return err
 	}
 
+	_, err = fmt.Fprintf(w, "%s %s HTTP/1.1\r\n", valueOrDefault(r.Method, "GET"), ruri)
+	if err != nil {
+		return err
+	}
+
 	err = header.write(w, trace)
 	if err != nil {
 		return err
 	}
 
 	if extraHeaders != nil {
+		// DisableKeepAlives may independently request close. Its generated
+		// field must not duplicate the close already selected for the wire.
+		if headerHasToken(header, "Connection", "close") && extraHeaders.Get("Connection") == "close" {
+			extraHeaders = extraHeaders.Clone()
+			extraHeaders.Del("Connection")
+		}
 		err = extraHeaders.write(w, trace)
 		if err != nil {
 			return err

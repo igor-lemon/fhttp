@@ -181,7 +181,7 @@ var reqWriteTests = []reqWriteTest{
 			URL:    mustParseURL("http://example.com/"),
 			Host:   "example.com",
 			Header: Header{
-				"Content-Length": []string{"10"}, // ignored
+				"Content-Length": []string{"6"}, // explicit raw field, matching the complete body
 			},
 			ContentLength: 6,
 		},

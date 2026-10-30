@@ -94,6 +94,20 @@ func newTransferWriter(r interface{}) (t *transferWriter, err error) {
 		t.Body = rr.Body
 		t.BodyCloser = rr.Body
 		t.ContentLength = rr.outgoingLength()
+		// Explicit raw Content-Length is part of fhttp's API. Validate it
+		// against known metadata, and use it to delimit unknown-length bodies.
+		// Never combine it with transfer coding or generate a second field.
+		if length, present, e := explicitContentLength(rr.Header); e != nil {
+			return nil, e
+		} else if present {
+			if len(rr.TransferEncoding) != 0 || hasHeaderName(rr.Header, "Transfer-Encoding") {
+				return nil, errors.New("http: Content-Length with Transfer-Encoding")
+			}
+			if t.ContentLength >= 0 && t.ContentLength != length {
+				return nil, fmt.Errorf("http: Content-Length header %d differs from body length %d", length, t.ContentLength)
+			}
+			t.ContentLength = length
+		}
 		if t.ContentLength < 0 && len(t.TransferEncoding) == 0 && t.shouldSendChunkedRequestBody() {
 			t.TransferEncoding = []string{"chunked"}
 		}
@@ -260,7 +274,7 @@ func (t *transferWriter) shouldSendContentLength() bool {
 
 // addHeaders adds transfer headers to an existing header object
 func (t *transferWriter) addHeaders(hdrs *Header, trace *httptrace.ClientTrace) error {
-	if t.Close && !hasToken(t.Header.get("Connection"), "close") {
+	if t.Close && !headerHasToken(t.Header, "Connection", "close") {
 		hdrs.Add("Connection", "close")
 		if trace != nil && trace.WroteHeaderField != nil {
 			trace.WroteHeaderField("Connection", []string{"close"})
@@ -270,7 +284,7 @@ func (t *transferWriter) addHeaders(hdrs *Header, trace *httptrace.ClientTrace) 
 	// Write Content-Length and/or Transfer-Encoding whose Values are a
 	// function of the sanitized field triple (Body, ContentLength,
 	// TransferEncoding)
-	if t.shouldSendContentLength() {
+	if t.shouldSendContentLength() && !hasHeaderName(*hdrs, "Content-Length") {
 		hdrs.Add("Content-Length", strconv.FormatInt(t.ContentLength, 10))
 		if trace != nil && trace.WroteHeaderField != nil {
 			trace.WroteHeaderField("Content-Length", []string{strconv.FormatInt(t.ContentLength, 10)})
@@ -364,6 +378,49 @@ func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) 
 	}
 
 	return nil
+}
+
+// Header names are case-insensitive on the wire; map spelling is retained.
+func hasHeaderName(h Header, name string) bool {
+	for key := range h {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func headerHasToken(h Header, name, token string) bool {
+	for key, values := range h {
+		if strings.EqualFold(key, name) {
+			for _, value := range values {
+				if hasToken(value, token) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func explicitContentLength(h Header) (length int64, present bool, err error) {
+	for key, values := range h {
+		if !strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		if present || len(values) != 1 {
+			return 0, true, errors.New("http: multiple or empty Content-Length fields")
+		}
+		present = true
+		length, err = parseContentLength(values[0])
+		if err != nil {
+			return 0, true, err
+		}
+		if length < 0 {
+			return 0, true, errors.New("http: empty Content-Length")
+		}
+	}
+	return
 }
 
 // always closes t.BodyCloser
