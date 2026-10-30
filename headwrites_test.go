@@ -198,10 +198,16 @@ func TestUnsetARequestGoesThroughTheConnectionsBuffer(t *testing.T) {
 	if writes, _ := sent(t, tr, log, req); len(writes) < 2 || len(writes[0]) != 4096 {
 		t.Errorf("a head of 30 KB: writes of %v", lengths(writes))
 	}
-	// A body in the NopCloser NewRequest puts it in is flushed apart, as
-	// before: isKnownInMemoryReader does not see through it.
-	if writes, head := sent(t, tr, log, posting(t, "f")); len(writes) != 2 || len(writes[0]) != head {
-		t.Errorf("a small body: writes of %v, a head of %d", lengths(writes), head)
+	// Go's WriterTo-preserving NopCloser is a known in-memory reader:
+	// the existing connection buffer keeps the complete small body with its head.
+	if writes, head := sent(t, tr, log, posting(t, "f")); len(writes) != 1 || len(writes[0]) != head+1 || !strings.HasSuffix(writes[0], "\r\n\r\nf") {
+		t.Errorf("a buffered small body: writes of %v, a head of %d", lengths(writes), head)
+	}
+	// An unknown reader must still flush its head before reading the body.
+	req, _ = http.NewRequest("POST", "http://example.test/p", struct{ io.Reader }{strings.NewReader("g")})
+	req.ContentLength = 1
+	if writes, head := sent(t, tr, log, req); len(writes) != 2 || len(writes[0]) != head || writes[1] != "g" {
+		t.Errorf("an unknown reader: writes of %v, a head of %d", lengths(writes), head)
 	}
 }
 
