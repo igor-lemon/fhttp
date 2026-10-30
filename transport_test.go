@@ -40,6 +40,7 @@ import (
 	tls "github.com/igor-lemon/utls"
 
 	. "github.com/igor-lemon/fhttp"
+	"github.com/igor-lemon/fhttp/http2"
 	"github.com/igor-lemon/fhttp/httptest"
 	"github.com/igor-lemon/fhttp/httptrace"
 	"github.com/igor-lemon/fhttp/httputil"
@@ -5923,9 +5924,11 @@ func TestTransportClone(t *testing.T) {
 		MaxMergedHeadAndBody: 1,
 	}
 	tr.PseudoHeaderOrder = []string{":method", ":authority", ":scheme", ":path"}
-	if err := ExportHttp2ConfigureTransport(tr); err != nil {
+	h2, err := http2.ConfigureTransports(tr)
+	if err != nil {
 		t.Fatal(err)
 	}
+	tr.H2transport = h2
 
 	tr2 := tr.Clone()
 	rv := reflect.ValueOf(tr2).Elem()

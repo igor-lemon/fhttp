@@ -607,3 +607,15 @@ cohort receives every exact ACK; an above-limit cohort must close and release
 the connection. All20race repetitions pass (32.684s). Separately injected queue-
 guard and header-order mutants are rejected (expected exit1); both production
 files were restored and match the positive export source SHA exactly.
+
+## A11 actual omit-bundled-H2 acceptance
+
+TestOmitHTTP2 builds this fork's whole module with the tag (the inherited test
+ran the standard library instead). Vet also targets this fork. Both subprocesses
+have bounded contexts. A separate owned tagged runtime witness tests the actual
+omission marker, fresh Clone and a complete H1 request/response; the owner gate
+runs it after the root-suite cooldown, without skipping TestOmitHTTP2. Only the
+bundled-framer-specific file carries the matching !nethttpomithttp2 build tag;
+its full tests remain mandatory in the normal suite. External H2 peers explicitly
+configure the standalone server, including Clone's complete reflective fixture.
+Tagged compile/build, parent/vet controls and20race tagged exchanges pass.
