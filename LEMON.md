@@ -502,3 +502,20 @@ request, so that a redirect policy given in place of its own copies no
 caller's credentials to a subdomain, nor back to the origin after one. Tests
 in `redirect_security_test.go` (`TestRedirectCredentialsKeptToTheirOrigin`:
 before the copier read it, a subdomain kept them and so did the hop back).
+
+## A11 request wire ownership and framing
+
+WrittenHeader deep-copies caller maps/slices and gives HeaderFor an owned working
+copy; its selected result is copied too. Generated H1 fields never accumulate in
+caller data or callback results. Header spelling/order and explicit-empty fields
+remain data. Raw Content-Length is retained exactly once, including leading
+zeros, and delimits unknown-length bodies; contradictory lengths, duplicate
+fields and transfer-coding conflicts fail. Host, User-Agent and Connection
+presence checks honor case-insensitive field names. DisableKeepAlives cannot add
+a second generated close. RequestWrite's old contradictory raw length now has a
+matching complete body, with independent invalid/short/long controls.
+
+Before: repeated serialization changed caller headers and accumulated framing.
+After: original RequestWrite plus ownership/framing/HeaderFor controls pass20
+race repetitions, including origin/proxy forms and callback input/result
+ownership. Browser profile values are unchanged; this is generic engine1 logic.
