@@ -5922,6 +5922,11 @@ func TestTransportClone(t *testing.T) {
 		WriteBufferSize:      1,
 		MaxMergedHeadAndBody: 1,
 	}
+	tr.PseudoHeaderOrder = []string{":method", ":authority", ":scheme", ":path"}
+	if err := ExportHttp2ConfigureTransport(tr); err != nil {
+		t.Fatal(err)
+	}
+
 	tr2 := tr.Clone()
 	rv := reflect.ValueOf(tr2).Elem()
 	rt := rv.Type()
