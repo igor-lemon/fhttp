@@ -2,9 +2,13 @@ package http2
 
 import (
 	"bytes"
-	"log"
+	"fmt"
+	"golang.org/x/net/http2/hpack"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	http "github.com/igor-lemon/fhttp"
 	"github.com/igor-lemon/fhttp/httptrace"
@@ -80,7 +84,7 @@ func TestHeaderOrder2(t *testing.T) {
 			hk += key + " "
 		},
 	}
-	req, err := http.NewRequest("GET", "https://httpbin.org/#/Request_inspection/get_headers", nil)
+	req, err := http.NewRequest("GET", "https://owned.example/headers", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,21 +94,14 @@ func TestHeaderOrder2(t *testing.T) {
 	req.Header[http.HeaderOrderKey] = []string{"grind", "experience", "live"}
 	req.Header[http.PHeaderOrderKey] = []string{":method", ":authority", ":scheme", ":path"}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	tr := &Transport{}
-	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatal(err.Error())
-	}
-	defer resp.Body.Close()
-
-	eq := strings.EqualFold(hk, ":method :authority :scheme :path grind experience live accept-encoding user-agent ")
-	if !eq {
-		t.Fatalf("Header order not set properly, \n Got %v \n Want: %v", hk, ":method :authority :scheme :path grind experience live accept-encoding user-agent")
+	assertOwnedHeaderOrder(t, req, []string{":method", ":authority", ":scheme", ":path", "grind", "experience", "live", "accept-encoding", "user-agent"})
+	if !strings.EqualFold(hk, ":method :authority :scheme :path grind experience live accept-encoding user-agent ") {
+		t.Fatalf("trace order=%q", hk)
 	}
 }
 
 func TestHeaderOrder3(t *testing.T) {
-	req, err := http.NewRequest("GET", "https://google.com", nil)
+	req, err := http.NewRequest("GET", "https://owned.example/headers", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,11 +140,88 @@ func TestHeaderOrder3(t *testing.T) {
 		hdrs += key + "\n"
 	}}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	tr := Transport{}
-	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatal(err)
+	assertOwnedHeaderOrder(t, req, []string{":authority", ":method", ":path", ":scheme", "sec-ch-ua", "accept", "sec-ch-ua-mobile", "user-agent", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer", "accept-encoding", "accept-language", "cache-control", "pragma", "sec-fetch-user", "upgrade-insecure-requests"})
+	if strings.TrimSpace(hdrs) == "" {
+		t.Fatal("no header trace")
 	}
-	defer resp.Body.Close()
-	log.Println(hdrs)
+}
+
+// The oracle decodes actual HPACK received by an owned peer. It never builds
+// its result from expected profile data or trusts only the client trace hook.
+func assertOwnedHeaderOrder(t *testing.T, req *http.Request, want []string) {
+	t.Helper()
+	original := req.Header.Clone()
+	ct := newClientTester(t)
+	ct.sc.SetDeadline(time.Now().Add(5 * time.Second))
+	ct.cc.SetDeadline(time.Now().Add(5 * time.Second))
+	ct.client = func() error {
+		response, err := ct.tr.RoundTrip(req)
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		_, err = io.Copy(io.Discard, response.Body)
+		if response.StatusCode != 200 {
+			return fmt.Errorf("status=%d", response.StatusCode)
+		}
+		if !reflect.DeepEqual(req.Header, original) {
+			return fmt.Errorf("caller header changed")
+		}
+		return err
+	}
+	ct.server = func() error {
+		ct.greet()
+		for {
+			frame, err := ct.fr.ReadFrame()
+			if err != nil {
+				return err
+			}
+			switch f := frame.(type) {
+			case *SettingsFrame, *WindowUpdateFrame:
+			case *HeadersFrame:
+				block := append([]byte(nil), f.HeaderBlockFragment()...)
+				ended := f.HeadersEnded()
+				for !ended {
+					next, err := ct.fr.ReadFrame()
+					if err != nil {
+						return err
+					}
+					cont, ok := next.(*ContinuationFrame)
+					if !ok || cont.StreamID != f.StreamID {
+						return fmt.Errorf("unexpected continuation %T", next)
+					}
+					block = append(block, cont.HeaderBlockFragment()...)
+					ended = cont.HeadersEnded()
+				}
+				fields, err := hpack.NewDecoder(4096, nil).DecodeFull(block)
+				if err != nil {
+					return err
+				}
+				var names []string
+				values := make(map[string][]string)
+				for _, field := range fields {
+					names = append(names, field.Name)
+					values[field.Name] = append(values[field.Name], field.Value)
+				}
+				if !reflect.DeepEqual(names, want) {
+					return fmt.Errorf("wire order=%v,want %v", names, want)
+				}
+				if !reflect.DeepEqual(values[":method"], []string{req.Method}) || !reflect.DeepEqual(values[":authority"], []string{req.URL.Host}) || !reflect.DeepEqual(values[":path"], []string{req.URL.RequestURI()}) {
+					return fmt.Errorf("wrong pseudo-header values: %v", values)
+				}
+				for key, v := range req.Header {
+					if key == http.HeaderOrderKey || key == http.PHeaderOrderKey {
+						continue
+					}
+					if !reflect.DeepEqual(values[strings.ToLower(key)], v) {
+						return fmt.Errorf("wire %s=%v,want %v", key, values[strings.ToLower(key)], v)
+					}
+				}
+				return ct.fr.WriteHeaders(HeadersFrameParam{StreamID: f.StreamID, EndHeaders: true, EndStream: true, BlockFragment: []byte{0x88}})
+			default:
+				return fmt.Errorf("unexpected frame %T", f)
+			}
+		}
+	}
+	ct.run()
 }

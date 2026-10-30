@@ -595,3 +595,15 @@ handler must receive each promise with the right originating request. Brotli
 uses an owned encoder and verifies the complete decoded body and preserved raw
 coding header.20race repetitions pass under the loopback-only sandbox. No
 external registration POST or third-party service is part of acceptance.
+
+## A11 independent H2 header and control-queue peers
+
+HeaderOrder2/3 send to an owned raw H2 peer; x/net's independent HPACK decoder
+checks the actual received pseudo/regular field order and values, plus caller
+immutability. The trace remains an additional check. The control-queue test uses
+net.Pipe after a complete SETTINGS/ACK/WINDOW_UPDATE greeting: blocked ACK output
+forces a bounded queue without depending on host TCP buffers. A below-limit
+cohort receives every exact ACK; an above-limit cohort must close and release
+the connection. All20race repetitions pass (32.684s). Separately injected queue-
+guard and header-order mutants are rejected (expected exit1); both production
+files were restored and match the positive export source SHA exactly.

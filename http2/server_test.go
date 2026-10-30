@@ -1165,29 +1165,98 @@ func TestServer_Ping(t *testing.T) {
 }
 
 func TestServer_MaxQueuedControlFrames(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-
-	st := newServerTester(t, nil)
-	defer st.Close()
-	st.greet()
-
-	const extraPings = 500000 // enough to fill the TCP buffers
-
-	for i := 0; i < maxQueuedControlFrames+extraPings; i++ {
-		pingData := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
-		if err := st.fr.WritePing(false, pingData); err != nil {
-			if i == 0 {
+	// net.Pipe has no kernel send buffer. After greeting, withholding reads
+	// deterministically blocks ACK output while valid PINGs fill the queue.
+	// The old 500000-frame TCP stimulus could fit the host's socket buffers.
+	for _, over := range []bool{false, true} {
+		t.Run(map[bool]string{false: "below", true: "above"}[over], func(t *testing.T) {
+			server, client := net.Pipe()
+			defer server.Close()
+			defer client.Close()
+			deadline := time.Now().Add(5 * time.Second)
+			server.SetDeadline(deadline)
+			client.SetDeadline(deadline)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				(&Server{}).ServeConn(server, &ServeConnOpts{BaseConfig: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("unexpected request") })}})
+			}()
+			fr := NewFramer(client, client)
+			if _, err := io.WriteString(client, ClientPreface); err != nil {
 				t.Fatal(err)
 			}
-			// We expect the connection to get closed by the server when the TCP
-			// buffer fills up and the write queue reaches MaxQueuedControlFrames.
-			t.Logf("sent %d PING frames", i)
-			return
-		}
+			if err := fr.WriteSettings(); err != nil {
+				t.Fatal(err)
+			}
+			seenSettings, seenAck, seenWindow := false, false, false
+			for !seenSettings || !seenAck || !seenWindow {
+				f, err := fr.ReadFrame()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if window, ok := f.(*WindowUpdateFrame); ok {
+					want := uint32((&Server{}).initialConnRecvWindowSize() - initialWindowSize)
+					if seenWindow || window.StreamID != 0 || window.Increment != want {
+						t.Fatalf("unexpected initial window: %v", window)
+					}
+					seenWindow = true
+					continue
+				}
+				if settings, ok := f.(*SettingsFrame); ok {
+					if settings.IsAck() {
+						seenAck = true
+					} else {
+						seenSettings = true
+						if err := fr.WriteSettingsAck(); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			n := maxQueuedControlFrames - 1
+			if over {
+				n = maxQueuedControlFrames + 4
+			}
+			payload := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+			for i := 0; i < n; i++ {
+				if err := fr.WritePing(false, payload); err != nil {
+					if !over || i < maxQueuedControlFrames {
+						t.Fatalf("premature close at PING%d: %v", i, err)
+					}
+					break
+				}
+			}
+			if over {
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("server did not close an overfull control queue")
+				}
+			} else {
+				for i := 0; i < n; i++ {
+					f, err := fr.ReadFrame()
+					if err != nil {
+						t.Fatal(err)
+					}
+					ping, ok := f.(*PingFrame)
+					if !ok || !ping.IsAck() || ping.Data != payload {
+						t.Fatalf("ACK%d=%v", i, f)
+					}
+				}
+				select {
+				case <-done:
+					t.Fatal("server closed a legal queue")
+				default:
+				}
+			}
+			client.Close()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("server did not release connection")
+			}
+		})
 	}
-	t.Errorf("unexpected success sending all PING frames")
 }
 
 func TestServer_RejectsLargeFrames(t *testing.T) {
