@@ -182,7 +182,7 @@ var reqWriteTests = []reqWriteTest{
 			URL:    mustParseURL("http://example.com/"),
 			Host:   "example.com",
 			Header: Header{
-				"Content-Length": []string{"10"}, // ignored
+				"Content-Length": []string{"6"}, // explicit raw field, matching the complete body
 			},
 			ContentLength: 6,
 		},
@@ -993,9 +993,10 @@ func TestRequestWriteKeepsTransferHeaderNames(t *testing.T) {
 		want    []string // transfer header lines, in order
 	}{
 		{"lowercase", "POST", strings.NewReader("abc"), 3, Header{"content-length": {"3"}}, nil, []string{"content-length: 3"}},
-		{"uppercase with a wrong value", "POST", strings.NewReader("abc"), 3, Header{"CONTENT-LENGTH": {"99"}}, nil, []string{"CONTENT-LENGTH: 3"}},
-		{"two spellings", "POST", strings.NewReader("abc"), 3, Header{"content-length": {"3"}, "Content-length": {"3"}}, nil, []string{"Content-Length: 3"}},
-		{"GET drops it", "GET", nil, 0, Header{"content-length": {"3"}}, nil, nil},
+		// [fhttp] A caller's raw Content-Length is kept exactly once, and one
+		// the body contradicts, given twice or with no body fails
+		// (TestTransportContentLengthHeaders and RequestWrite's own); upstream
+		// #32 takes it from the request alone.
 		{"lowercase transfer-encoding", "POST", io.MultiReader(strings.NewReader("abc")), -1, Header{"transfer-encoding": {"chunked"}}, nil, []string{"transfer-encoding: chunked"}},
 		{"lowercase trailer", "POST", io.MultiReader(strings.NewReader("abc")), -1, Header{"trailer": {"x"}}, Header{"X-Foo": nil}, []string{"Transfer-Encoding: chunked", "trailer: X-Foo"}},
 	}
