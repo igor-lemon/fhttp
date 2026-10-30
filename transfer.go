@@ -538,12 +538,16 @@ func (t *transferWriter) doBodyCopy(dst io.Writer, src io.Reader) (n int64, err 
 //
 // This function is only intended for use in writeBody.
 func (t *transferWriter) unwrapBody() io.Reader {
-	if r, ok := unwrapNopCloser(t.Body); ok {
-		return r
+	if tp := reflect.TypeOf(t.Body); tp == nopCloserType || tp == nopCloserWriterToType {
+		return reflect.ValueOf(t.Body).Field(0).Interface().(io.Reader)
 	}
 	if r, ok := t.Body.(*readTrackingBody); ok {
 		r.didRead = true
-		return r.ReadCloser
+		body := r.ReadCloser
+		if tp := reflect.TypeOf(body); tp == nopCloserType || tp == nopCloserWriterToType {
+			return reflect.ValueOf(body).Field(0).Interface().(io.Reader)
+		}
+		return body
 	}
 	return t.Body
 }
@@ -1201,9 +1205,8 @@ var nopCloserWriterToType = reflect.TypeOf(io.NopCloser(bytes.NewReader(nil)))
 
 // heldInMemory reports whether r is a body held in memory: a *bytes.Reader, a
 // *bytes.Buffer or a *strings.Reader, as it is or in the io.NopCloser or the
-// readTrackingBody a request's body comes in. isKnownInMemoryReader does not
-// see through the io.NopCloser of any of them, which has had a type of its own
-// since Go 1.20, and is kept as it was for the requests it decides on.
+// readTrackingBody a request's body comes in. io.NopCloser preserves WriterTo
+// on readers that implement it, with a distinct wrapper type since Go 1.20.
 func heldInMemory(r io.Reader) bool {
 	switch r := r.(type) {
 	case *bytes.Reader, *bytes.Buffer, *strings.Reader:
@@ -1225,16 +1228,6 @@ func (t *transferWriter) mergesWith(n, limit int) bool {
 		int64(n)+t.ContentLength <= int64(limit)
 }
 
-// unwrapNopCloser returns the reader that r wraps and true if r was returned by io.NopCloser, or false if it was not.
-func unwrapNopCloser(r io.Reader) (io.Reader, bool) {
-	switch reflect.TypeOf(r) {
-	case nopCloserType, nopCloserWriterToType:
-		return reflect.ValueOf(r).Field(0).Interface().(io.Reader), true
-	default:
-		return nil, false
-	}
-}
-
 // isKnownInMemoryReader reports whether r is a type known to not
 // block on Read. Its caller uses this as an optional optimization to
 // send fewer TCP packets.
@@ -1243,8 +1236,8 @@ func isKnownInMemoryReader(r io.Reader) bool {
 	case *bytes.Reader, *bytes.Buffer, *strings.Reader:
 		return true
 	}
-	if r, ok := unwrapNopCloser(r); ok {
-		return isKnownInMemoryReader(r)
+	if t := reflect.TypeOf(r); t == nopCloserType || t == nopCloserWriterToType {
+		return isKnownInMemoryReader(reflect.ValueOf(r).Field(0).Interface().(io.Reader))
 	}
 	if r, ok := r.(*readTrackingBody); ok {
 		return isKnownInMemoryReader(r.ReadCloser)

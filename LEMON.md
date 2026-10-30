@@ -519,3 +519,14 @@ Before: repeated serialization changed caller headers and accumulated framing.
 After: original RequestWrite plus ownership/framing/HeaderFor controls pass20
 race repetitions, including origin/proxy forms and callback input/result
 ownership. Browser profile values are unchanged; this is generic engine1 logic.
+
+## A11 Go reader wrappers
+
+In-memory detection and body unwrapping recognize both io.NopCloser wrapper
+types, including the WriterTo-preserving form; readTrackingBody retains its
+read bookkeeping while exposing the actual wrapped body. The transfer fixture
+uses Go1.26.10's own os.fileWithoutWriteTo adaptation for issue58808, preserving
+the exact underlying reader-type assertion. The first repeat retained four
+failures; after the wrapper correction and upstream fixture adaptation all
+DetectInMemoryReaders/TransferWriterWriteBodyReaderTypes/ClientWrites controls
+passed20race repetitions. Header/body merge choices remain in profile policy.
