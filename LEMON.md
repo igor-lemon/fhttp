@@ -566,3 +566,9 @@ old conversion of nil into empty. H1's fixture now checks fhttp's existing raw
 multi-value/empty User-Agent contract, not net/http's first-value projection;
 H2's original exact expectations remain. Both also assert caller immutability.
 All20race repetitions pass. No browser profile value or dispatch was added.
+
+The no-explicit-merge buffering fixture now checks both modern Go wrapper cases:
+a known in-memory NopCloser shares the connection buffer with its complete body;
+an unknown reader still flushes the complete head before its body. The30KB head
+continues to cross the4KB buffer. The assertions compare all body bytes and
+write boundaries;20race repetitions pass.
