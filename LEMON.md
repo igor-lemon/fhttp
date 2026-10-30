@@ -547,3 +547,13 @@ New lazy/blocking/metadata/complete-body controls failed on the before source
 original H12/gzip/deflate tests passed20race repetitions. The bundled H2 change
 mirrors the standalone source condition exactly; no browser values changed.
 External Brotli fixture and full fork acceptance remain separate obligations.
+
+## A11 diagnostic attribution and field traces
+
+Server diagnostic attribution skips this fork's own package frames. Request
+field construction no longer emits a second WroteHeaderField notification:
+header.write remains the single emitter for serialized request fields. Response
+writeHeader tracing is unchanged. An independent complete trace-to-wire map
+comparison proved duplicate Connection/Content-Length events before correction;
+it also requires all caller/framing/trailer fields so missing events fail.
+Original close/header/log controls plus this witness passed20race repetitions.

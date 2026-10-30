@@ -272,13 +272,11 @@ func (t *transferWriter) shouldSendContentLength() bool {
 	return t.policy.SendContentLength(t.Method, t.ContentLength, t.bodyProvided, isIdentity(t.TransferEncoding))
 }
 
-// addHeaders adds transfer headers to an existing header object
-func (t *transferWriter) addHeaders(hdrs *Header, trace *httptrace.ClientTrace) error {
+// addHeaders constructs transfer fields. header.write emits their trace events
+// when it serializes them, exactly once alongside all other fields.
+func (t *transferWriter) addHeaders(hdrs *Header) error {
 	if t.Close && !headerHasToken(t.Header, "Connection", "close") {
 		hdrs.Add("Connection", "close")
-		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("Connection", []string{"close"})
-		}
 	}
 
 	// Write Content-Length and/or Transfer-Encoding whose Values are a
@@ -286,14 +284,8 @@ func (t *transferWriter) addHeaders(hdrs *Header, trace *httptrace.ClientTrace) 
 	// TransferEncoding)
 	if t.shouldSendContentLength() && !hasHeaderName(*hdrs, "Content-Length") {
 		hdrs.Add("Content-Length", strconv.FormatInt(t.ContentLength, 10))
-		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("Content-Length", []string{strconv.FormatInt(t.ContentLength, 10)})
-		}
 	} else if chunked(t.TransferEncoding) {
 		hdrs.Add("Transfer-Encoding", "chunked")
-		if trace != nil && trace.WroteHeaderField != nil {
-			trace.WroteHeaderField("Transfer-Encoding", []string{"chunked"})
-		}
 	}
 
 	// Write Trailer header
@@ -312,9 +304,6 @@ func (t *transferWriter) addHeaders(hdrs *Header, trace *httptrace.ClientTrace) 
 			// TODO: could do better allocation-wise here, but trailers are rare,
 			// so being lazy for now.
 			hdrs.Add("Trailer", strings.Join(keys, ","))
-			if trace != nil && trace.WroteHeaderField != nil {
-				trace.WroteHeaderField("Trailer", keys)
-			}
 		}
 	}
 

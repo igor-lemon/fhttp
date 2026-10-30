@@ -1118,7 +1118,7 @@ func checkWriteHeaderCode(code int) {
 	}
 }
 
-// relevantCaller searches the call stack for the first function outside of net/http.
+// relevantCaller searches the call stack for the first function outside this HTTP package.
 // The purpose of this function is to provide more helpful error messages.
 func relevantCaller() runtime.Frame {
 	pc := make([]uintptr, 16)
@@ -1127,7 +1127,7 @@ func relevantCaller() runtime.Frame {
 	var frame runtime.Frame
 	for {
 		frame, more := frames.Next()
-		if !strings.HasPrefix(frame.Function, "net/http.") {
+		if !strings.HasPrefix(frame.Function, "github.com/igor-lemon/fhttp.") {
 			return frame
 		}
 		if !more {
