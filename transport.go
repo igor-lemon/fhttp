@@ -370,6 +370,7 @@ func (t *Transport) Clone() *Transport {
 		WriteBufferSize:        t.WriteBufferSize,
 		ReadBufferSize:         t.ReadBufferSize,
 		MaxMergedHeadAndBody:   t.MaxMergedHeadAndBody,
+		PseudoHeaderOrder:      append([]string(nil), t.PseudoHeaderOrder...),
 		ConnectionFlow:         t.ConnectionFlow,
 		ConnectionFlowSet:      t.ConnectionFlowSet,
 	}
@@ -383,6 +384,9 @@ func (t *Transport) Clone() *Transport {
 		}
 		t2.TLSNextProto = npm
 	}
+	if t.H2transport != nil && !t.tlsNextProtoWasNil {
+		t.H2transport.CloneFor(t2)
+	}
 	return t2
 }
 
@@ -394,6 +398,9 @@ func (t *Transport) Clone() *Transport {
 // namespace used by x/tools/cmd/bundle for h2_bundle.go.
 type h2Transport interface {
 	CloseIdleConnections()
+	// CloneFor copies configuration and binds a new pool/upgrade closure to
+	// the fresh owner. No cached connection or synchronization state is shared.
+	CloneFor(*Transport)
 }
 
 func (t *Transport) hasCustomTLSDialer() bool {
