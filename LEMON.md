@@ -619,3 +619,14 @@ bundled-framer-specific file carries the matching !nethttpomithttp2 build tag;
 its full tests remain mandatory in the normal suite. External H2 peers explicitly
 configure the standalone server, including Clone's complete reflective fixture.
 Tagged compile/build, parent/vet controls and20race tagged exchanges pass.
+
+## A11 file-copy test stimulus
+
+The original real TCP.ReadFrom/sendfile file fixture passed20race repetitions
+outside Seatbelt; inside the unchanged loopback-only sandbox sendfile fails
+EPERM. Its test mock now records ReaderFrom selection atomically and copies via
+real TCP Write while retaining every I/O error. All file/buffer/known/unknown
+length cases verify the exact complete binary body at the owned peer. This is
+a deterministic fhttp dispatch/integrity obligation, not a claim about kernel
+sendfile or browser TCP. All20race repetitions pass under the original sandbox;
+production code and the sandbox policy are unchanged.

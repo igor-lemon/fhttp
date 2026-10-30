@@ -5753,16 +5753,20 @@ func TestTransportRequestReplayable(t *testing.T) {
 type testMockTCPConn struct {
 	*net.TCPConn
 
-	ReadFromCalled bool
+	ReadFromCalled atomic.Bool
 }
 
 func (c *testMockTCPConn) ReadFrom(r io.Reader) (int64, error) {
-	c.ReadFromCalled = true
-	return c.TCPConn.ReadFrom(r)
+	c.ReadFromCalled.Store(true)
+	// This fixture tests fhttp's ReaderFrom selection and complete I/O.
+	// Hide the kernel sendfile optimization (which Seatbelt denies even for
+	// owned loopback), retaining real TCP writes and every copy error.
+	return io.Copy(struct{ io.Writer }{c.TCPConn}, r)
 }
 
 func TestTransportRequestWriteRoundTrip(t *testing.T) {
 	nBytes := int64(1 << 10)
+	payload := bytes.Repeat([]byte{0, 0x5a, 0xff, 0x10}, int(nBytes)/4)
 	newFileFunc := func() (r io.Reader, done func(), err error) {
 		f, err := os.CreateTemp("", "net-http-newfilefunc")
 		if err != nil {
@@ -5770,7 +5774,7 @@ func TestTransportRequestWriteRoundTrip(t *testing.T) {
 		}
 
 		// Write some bytes to the file to enable reading.
-		if _, err := io.CopyN(f, rand.Reader, nBytes); err != nil {
+		if _, err := f.Write(payload); err != nil {
 			return nil, nil, fmt.Errorf("failed to write data to file: %v", err)
 		}
 		if _, err := f.Seek(0, 0); err != nil {
@@ -5786,7 +5790,7 @@ func TestTransportRequestWriteRoundTrip(t *testing.T) {
 	}
 
 	newBufferFunc := func() (io.Reader, func(), error) {
-		return bytes.NewBuffer(make([]byte, nBytes)), func() {}, nil
+		return bytes.NewBuffer(bytes.Clone(payload)), func() {}, nil
 	}
 
 	cases := []struct {
@@ -5857,8 +5861,13 @@ func TestTransportRequestWriteRoundTrip(t *testing.T) {
 				t,
 				h1Mode,
 				HandlerFunc(func(w ResponseWriter, r *Request) {
-					io.Copy(io.Discard, r.Body)
+					body, err := io.ReadAll(r.Body)
 					r.Body.Close()
+					if err != nil || !bytes.Equal(body, payload) {
+						t.Errorf("received %d bytes, error=%v; want exact %d bytes", len(body), err, len(payload))
+						w.WriteHeader(500)
+						return
+					}
 					w.WriteHeader(200)
 				}),
 				trFunc,
@@ -5880,11 +5889,11 @@ func TestTransportRequestWriteRoundTrip(t *testing.T) {
 				t.Fatalf("status code = %d; want 200", resp.StatusCode)
 			}
 
-			if !tConn.ReadFromCalled && tc.expectedReadFrom {
+			if !tConn.ReadFromCalled.Load() && tc.expectedReadFrom {
 				t.Fatalf("did not call ReadFrom")
 			}
 
-			if tConn.ReadFromCalled && !tc.expectedReadFrom {
+			if tConn.ReadFromCalled.Load() && !tc.expectedReadFrom {
 				t.Fatalf("ReadFrom was unexpectedly invoked")
 			}
 		})
