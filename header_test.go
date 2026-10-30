@@ -661,3 +661,21 @@ func TestHeaderSorterLessEquivalence(t *testing.T) {
 		}
 	}
 }
+
+func TestHeaderCloneKeepsNilEmptyAndAbsent(t *testing.T) {
+	original := Header{"Nil": nil, "Empty": {}, "Values": {"first", "second"}}
+	cloned := original.Clone()
+	if _, ok := cloned["Absent"]; ok {
+		t.Fatal("absent header appeared")
+	}
+	if v, ok := cloned["Nil"]; !ok || v != nil {
+		t.Fatal("nil field changed")
+	}
+	if v, ok := cloned["Empty"]; !ok || v == nil || len(v) != 0 {
+		t.Fatal("explicit empty field changed")
+	}
+	cloned["Values"][0] = "changed"
+	if original["Values"][0] != "first" {
+		t.Fatal("clone shares value storage")
+	}
+}

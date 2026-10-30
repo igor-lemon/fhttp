@@ -129,6 +129,10 @@ func (h Header) Clone() Header {
 	sv := make([]string, nv) // shared backing array for headers' Values
 	h2 := make(Header, len(h))
 	for k, vv := range h {
+		if vv == nil {
+			h2[k] = nil
+			continue
+		}
 		n := copy(sv, vv)
 		h2[k] = sv[:n:n]
 		sv = sv[n:]
