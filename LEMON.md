@@ -530,3 +530,20 @@ the exact underlying reader-type assertion. The first repeat retained four
 failures; after the wrapper correction and upstream fixture adaptation all
 DetectInMemoryReaders/TransferWriterWriteBodyReaderTypes/ClientWrites controls
 passed20race repetitions. Header/body merge choices remain in profile policy.
+
+## A11 response decoding integrity
+
+Only a recognized, selected content decoder changes response Content-Length,
+Content-Encoding and Uncompressed; identity/unknown/plain bodies keep their
+original metadata. H2 respects its recorded automatic-compression selection.
+H1's existing explicit-gzip auto-decode contract stays intact. Content-coding
+names are case-insensitive. Raw/zlib deflate selection is lazy and preserves the
+prefix, without draining/closing the source to inspect two bytes. Decoder Close
+closes the source once before waiting for an active read and decoder cleanup;
+subsequent reads fail. Gzip readers still enter the pool only at EOF.
+
+New lazy/blocking/metadata/complete-body controls failed on the before source
+(including the eager deflate timeout). After correction, those controls plus
+original H12/gzip/deflate tests passed20race repetitions. The bundled H2 change
+mirrors the standalone source condition exactly; no browser values changed.
+External Brotli fixture and full fork acceptance remain separate obligations.

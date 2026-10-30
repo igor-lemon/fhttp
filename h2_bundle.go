@@ -9358,7 +9358,7 @@ func (rl *http2clientConnReadLoop) handleResponse(cs *http2clientStream, f *http
 	res.Body = http2transportResponseBody{cs}
 	go cs.awaitRequestCancel(cs.req)
 
-	if !cs.cc.t.DisableCompression {
+	if cs.requestedGzip {
 		res.Body = DecompressBody(res)
 	}
 

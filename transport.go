@@ -11,7 +11,6 @@ package http
 
 import (
 	"bufio"
-	"bytes"
 	"compress/zlib"
 	"container/list"
 	"context"
@@ -3016,40 +3015,61 @@ func (cl *connLRU) len() int {
 // DecompressBody returns the body of res decoded by its Content-Encoding, marking res as uncompressed
 // and removing its Content-Encoding and Content-Length, or the body itself if the encoding is not one fhttp decodes.
 func DecompressBody(res *Response) io.ReadCloser {
-	decode := decoder(res.Header.Get("Content-Encoding"))
-	if decode == nil {
+	ce := strings.ToLower(strings.TrimSpace(res.Header.Get("Content-Encoding")))
+	switch ce {
+	case "gzip", "br", "deflate", "zstd":
+		res.Header.Del("Content-Encoding")
+		res.Header.Del("Content-Length")
+		res.ContentLength = -1
+		res.Uncompressed = true
+		return DecompressBodyByType(res.Body, ce)
+	default:
 		return res.Body
 	}
-
-	res.Header.Del("Content-Encoding")
-	res.Header.Del("Content-Length")
-	res.ContentLength = -1
-	res.Uncompressed = true
-
-	return decode(res.Body)
 }
 
 func DecompressBodyByType(body io.ReadCloser, contentType string) io.ReadCloser {
-	if decode := decoder(contentType); decode != nil {
-		return decode(body)
+	switch strings.ToLower(strings.TrimSpace(contentType)) {
+	case "gzip":
+		return &gzipReader{
+			body: body,
+		}
+	case "br":
+		return &brReader{
+			body: body,
+		}
+	case "deflate":
+		return identifyDeflate(body)
+	case "zstd":
+		return &zstdReader{
+			body: body,
+		}
+	default:
+		return body
 	}
-	return body
 }
 
-// decoder returns what decodes a body in encoding, which is case-insensitive, or nil if fhttp does not decode it.
-func decoder(encoding string) func(body io.ReadCloser) io.ReadCloser {
-	switch strings.ToLower(encoding) {
-	case "gzip":
-		return func(body io.ReadCloser) io.ReadCloser { return &gzipReader{body: body} }
-	case "br":
-		return func(body io.ReadCloser) io.ReadCloser { return &brReader{body: body} }
-	case "deflate":
-		return func(body io.ReadCloser) io.ReadCloser { return &deflateReader{body: body} }
-	case "zstd":
-		return func(body io.ReadCloser) io.ReadCloser { return &zstdReader{body: body} }
-	default:
-		return nil
-	}
+// decoderLifecycle allows Close to interrupt a blocked source read before
+// waiting for decoder cleanup. Decoder state is never closed while Read uses
+// it; a reader pooled at EOF is already detached before Close can acquire mu.
+type decoderLifecycle struct {
+	mu     sync.Mutex
+	closed atomic.Bool
+	once   sync.Once
+	err    error
+}
+
+func (d *decoderLifecycle) close(body io.Closer, finish func()) error {
+	d.once.Do(func() {
+		d.closed.Store(true)
+		d.err = body.Close()
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if finish != nil {
+			finish()
+		}
+	})
+	return d.err
 }
 
 // gzipReaderPool recycles gzip.Readers between responses. Each gzip.Reader
@@ -3074,20 +3094,18 @@ var gzipReaderPool sync.Pool
 // gzipReader wraps a response body so it can lazily
 // call gzip.NewReader on the first call to Read
 type gzipReader struct {
-	_      incomparable
-	body   io.ReadCloser // underlying Response.Body
-	zr     *gzip.Reader  // lazily-initialized gzip reader
-	zerr   error         // sticky error
-	mu     sync.Mutex    // guards closed
-	closed bool          // whether Close was called
+	lifecycle decoderLifecycle
+	_         incomparable
+	body      io.ReadCloser // underlying Response.Body
+	zr        *gzip.Reader  // lazily-initialized gzip reader
+	zerr      error         // sticky error
 }
 
 func (gz *gzipReader) Read(p []byte) (n int, err error) {
-	gz.mu.Lock()
-	closed := gz.closed
-	gz.mu.Unlock()
-	if closed {
-		return 0, errReadOnClosedResBody
+	gz.lifecycle.mu.Lock()
+	defer gz.lifecycle.mu.Unlock()
+	if gz.lifecycle.closed.Load() {
+		return 0, ErrBodyReadAfterClose
 	}
 	if gz.zerr != nil {
 		return 0, gz.zerr
@@ -3131,23 +3149,26 @@ func (gz *gzipReader) Read(p []byte) (n int, err error) {
 }
 
 func (gz *gzipReader) Close() error {
-	gz.mu.Lock()
-	gz.closed = true
-	gz.mu.Unlock()
-	return gz.body.Close()
+	return gz.lifecycle.close(gz.body, nil)
 }
 
 // brReader lazily wraps a response body into an
 // io.ReadCloser, will call gzip.NewReader on first
 // call to read
 type brReader struct {
-	_    incomparable
-	body io.ReadCloser
-	zr   *brotli.Reader
-	zerr error
+	lifecycle decoderLifecycle
+	_         incomparable
+	body      io.ReadCloser
+	zr        *brotli.Reader
+	zerr      error
 }
 
 func (br *brReader) Read(p []byte) (n int, err error) {
+	br.lifecycle.mu.Lock()
+	defer br.lifecycle.mu.Unlock()
+	if br.lifecycle.closed.Load() {
+		return 0, ErrBodyReadAfterClose
+	}
 	if br.zerr != nil {
 		return 0, br.zerr
 	}
@@ -3158,70 +3179,49 @@ func (br *brReader) Read(p []byte) (n int, err error) {
 }
 
 func (br *brReader) Close() error {
-	return br.body.Close()
+	return br.lifecycle.close(br.body, nil)
 }
 
-// deflateReader wraps a response body and decompresses it on the first Read,
-// the way gzipReader and brReader do.
-//
-// Content-Encoding: deflate is served two ways. RFC 7230 says zlib-wrapped, and
-// plenty of servers send a raw DEFLATE stream instead, so which one it is can
-// only be told from the first two bytes. Sniffing them has to wait until the
-// body is read: doing it while the response was still being built blocked the
-// round trip before its headers came back, and buffering the whole body to put
-// the sniffed bytes back made every deflate response arrive at once.
+// deflateReader accepts the zlib wrapper used by the registered HTTP coding
+// and the existing raw-deflate compatibility path. Prefix inspection is lazy
+// and never drains or closes the source while choosing a decoder.
 type deflateReader struct {
-	_    incomparable
-	body io.ReadCloser
-	r    io.Reader
-	err  error
+	lifecycle decoderLifecycle
+	body      io.ReadCloser
+	r         io.ReadCloser
+	err       error
 }
 
 func (dr *deflateReader) Read(p []byte) (n int, err error) {
+	dr.lifecycle.mu.Lock()
+	defer dr.lifecycle.mu.Unlock()
+	if dr.lifecycle.closed.Load() {
+		return 0, ErrBodyReadAfterClose
+	}
 	if dr.err != nil {
 		return 0, dr.err
 	}
 	if dr.r == nil {
-		if err := dr.open(); err != nil {
-			dr.err = err
+		br := bufio.NewReader(dr.body)
+		header, _ := br.Peek(2)
+		if len(header) == 2 && looksLikeZlib([2]byte{header[0], header[1]}) {
+			dr.r, dr.err = zlib.NewReader(br)
+		} else {
+			dr.r = flate.NewReader(br)
+		}
+		if dr.err != nil {
 			return 0, dr.err
 		}
 	}
 	return dr.r.Read(p)
 }
 
-// open reads the two header bytes and picks the decompressor for them. They are
-// handed back to the stream rather than buffered, so a large body is still read
-// as it arrives.
-func (dr *deflateReader) open() error {
-	var header [2]byte
-	n, err := io.ReadFull(dr.body, header[:])
-	if err != nil && n == 0 {
-		return err
-	}
-
-	stream := io.MultiReader(bytes.NewReader(header[:n]), dr.body)
-
-	if n == 2 && looksLikeZlib(header) {
-		zr, err := zlib.NewReader(stream)
-		if err != nil {
-			return err
-		}
-		dr.r = zr
-
-		return nil
-	}
-
-	// Anything else is read as a raw DEFLATE stream. Handing the body back
-	// undecoded was the other half of this: the two sniffed bytes had already
-	// been taken off it, so it arrived both compressed and two bytes short.
-	dr.r = flate.NewReader(stream)
-
-	return nil
-}
-
 func (dr *deflateReader) Close() error {
-	return dr.body.Close()
+	return dr.lifecycle.close(dr.body, func() {
+		if dr.r != nil {
+			dr.r.Close()
+		}
+	})
 }
 
 // zstdMaxWindowSize is the largest window a zstd content coding may use, per RFC 9659 section 3.
@@ -3231,12 +3231,18 @@ const zstdMaxWindowSize = 8 << 20
 // zstdReader wraps a response body so it can lazily
 // call zstd.NewReader on the first call to Read
 type zstdReader struct {
-	body io.ReadCloser // underlying Response.Body
-	zr   *zstd.Decoder // lazily-initialized zstd reader
-	zerr error         // sticky error
+	lifecycle decoderLifecycle
+	body      io.ReadCloser // underlying Response.Body
+	zr        *zstd.Decoder // lazily-initialized zstd reader
+	zerr      error         // sticky error
 }
 
 func (zs *zstdReader) Read(p []byte) (n int, err error) {
+	zs.lifecycle.mu.Lock()
+	defer zs.lifecycle.mu.Unlock()
+	if zs.lifecycle.closed.Load() {
+		return 0, ErrBodyReadAfterClose
+	}
 	if zs.zerr != nil {
 		return 0, zs.zerr
 	}
@@ -3252,12 +3258,11 @@ func (zs *zstdReader) Read(p []byte) (n int, err error) {
 }
 
 func (zs *zstdReader) Close() error {
-	if zs.zr != nil {
-		zs.zr.Close() // zs.zr.Close() does not return a value, hence it's not checked for an error
-	}
-
-	// Close body and return error
-	return zs.body.Close()
+	return zs.lifecycle.close(zs.body, func() {
+		if zs.zr != nil {
+			zs.zr.Close()
+		}
+	})
 }
 
 // RFC 1950 section 2.2. The low nibble of the first byte is the compression
@@ -3269,17 +3274,15 @@ const (
 	zlibHeaderModulus = 31
 )
 
-// looksLikeZlib reports whether these two bytes open a zlib stream.
-//
-// Testing them against the four headers a default-window compressor happens to
-// produce (0x78 with 0x01, 0x5E, 0x9C or 0xDA) covers the common cases and
-// rejects the rest, so a stream written with a smaller window - 0x68 0x05, for
-// one, which compress/zlib reads without complaint - would be taken for raw
-// deflate and decoded into nothing usable.
+// looksLikeZlib reports whether these two bytes open a zlib stream (upstream
+// #27, as this fork's deflateReader told them already).
 func looksLikeZlib(header [2]byte) bool {
 	if header[0]&0x0f != zlibMethodDeflate || header[0]>>4 > zlibMaxWindow {
 		return false
 	}
-
 	return (uint16(header[0])<<8|uint16(header[1]))%zlibHeaderModulus == 0
+}
+
+func identifyDeflate(body io.ReadCloser) io.ReadCloser {
+	return &deflateReader{body: body}
 }
