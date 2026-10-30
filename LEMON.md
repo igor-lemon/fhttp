@@ -585,3 +585,13 @@ The original reflective fixture initializes the added configuration fields and
 still checks every exported field.20race repeats pass. Independent configured
 H2 wire tests (20race) require two actual connections, deep policy isolation,
 and that closing the clone leaves the original's live connection usable.
+
+## A11 owned example peers
+
+The basic header example uses a local JSON echo and checks the received UA and
+absence of internal ordering metadata. EnablePush uses a trusted owned TLS/H2
+peer that really sends promises and complete bodies for both GET and POST; the
+handler must receive each promise with the right originating request. Brotli
+uses an owned encoder and verifies the complete decoded body and preserved raw
+coding header.20race repetitions pass under the loopback-only sandbox. No
+external registration POST or third-party service is part of acceptance.

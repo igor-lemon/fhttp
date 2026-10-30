@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/andybalholm/brotli"
 	"io"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tls "github.com/igor-lemon/utls"
 
@@ -23,12 +25,17 @@ import (
 
 // Basic http test with Header Order + enable push
 func TestExample(t *testing.T) {
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(r.Header)
+	}))
+	defer peer.Close()
 	c := http.Client{}
 	// Otherwise the connection outlives the test and the goroutine-leak
 	// check in TestMain/afterTest flags every test that runs afterwards.
 	defer c.CloseIdleConnections()
 
-	req, err := http.NewRequest("GET", "https://httpbin.org/headers", strings.NewReader(""))
+	req, err := http.NewRequest("GET", peer.URL+"/headers", strings.NewReader(""))
 
 	if err != nil {
 		t.Error(err)
@@ -69,11 +76,18 @@ func TestExample(t *testing.T) {
 		t.Errorf("Expected status code 200, got %v", resp.StatusCode)
 	}
 
-	var data interface{}
+	var data map[string][]string
 	err = json.NewDecoder(resp.Body).Decode(&data)
 	if err != nil {
 		t.Error(err)
 	}
+	if got := data["User-Agent"]; len(got) != 1 || got[0] != req.Header["user-agent"][0] {
+		t.Fatalf("owned peer received UA=%v", got)
+	}
+	if len(data[http.HeaderOrderKey]) != 0 {
+		t.Fatal("internal ordering metadata leaked to peer")
+	}
+
 }
 
 func getCharlesCert() (*x509.CertPool, error) {
@@ -196,40 +210,78 @@ func TestWithCert(t *testing.T) {
 }
 
 // Test with push handler
+type obligationPushHandler func(*http2.PushedRequest)
+
+func (f obligationPushHandler) HandlePush(r *http2.PushedRequest) { f(r) }
+
 func TestEnablePush(t *testing.T) {
-	t1 := &http.Transport{
-		ForceAttemptHTTP2: true,
-	}
+	peer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/pushed" {
+			io.WriteString(w, "owned pushed body")
+			return
+		}
+		p, ok := w.(http.Pusher)
+		if !ok {
+			t.Error("owned peer did not negotiate H2")
+			w.WriteHeader(500)
+			return
+		}
+		if err := p.Push("/pushed?from="+r.Method, nil); err != nil {
+			t.Errorf("Push: %v", err)
+			w.WriteHeader(500)
+			return
+		}
+		io.WriteString(w, "owned "+r.Method)
+	}))
+	peer.EnableHTTP2 = true
+	peer.StartTLS()
+	defer peer.Close()
+	t1 := &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: peer.Client().Transport.(*http.Transport).TLSClientConfig.Clone()}
 	defer t1.CloseIdleConnections()
 	t2, err := http2.ConfigureTransports(t1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t2.PushHandler = &http2.DefaultPushHandler{}
 	t1.H2transport = t2
-	c := &http.Client{
-		Transport: t1,
+	received := make(chan string, 2)
+	t2.PushHandler = obligationPushHandler(func(p *http2.PushedRequest) {
+		response, err := p.ReadResponse(p.Promise.Context())
+		if err != nil {
+			received <- fmt.Sprint(err)
+			return
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != 200 || string(body) != "owned pushed body" || p.Promise.URL.Path != "/pushed" || p.OriginalRequestURL.Path != "/headers" {
+			received <- fmt.Sprintf("invalid pushed response: %q %v", body, err)
+			return
+		}
+		received <- p.Promise.URL.Query().Get("from")
+	})
+	c := &http.Client{Transport: t1, Timeout: 5 * time.Second}
+	for _, method := range []string{"GET", "POST"} {
+		req, err := http.NewRequest(method, peer.URL+"/headers", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || response.StatusCode != 200 || response.ProtoMajor != 2 || string(body) != "owned "+method {
+			t.Fatalf("main response: %q %v proto=%s", body, err, response.Proto)
+		}
+		select {
+		case got := <-received:
+			if got != method {
+				t.Fatalf("push=%q,want %s", got, method)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("push handler did not receive owned promise/body")
+		}
 	}
-	var req *http.Request
-	req, err = http.NewRequest("GET", "https://httpbin.org/headers", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := c.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-
-	req, err = http.NewRequest("POST", "https://httpbin.org/post", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err = c.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
 }
 
 // Test finishline
@@ -309,6 +361,16 @@ func TestFinishLine(t *testing.T) {
 
 // Test compression brotli
 func TestCompressionBrotli(t *testing.T) {
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "br" {
+			t.Errorf("accept encoding=%q", r.Header.Get("Accept-Encoding"))
+		}
+		w.Header().Set("Content-Encoding", "br")
+		encoded := brotli.NewWriter(w)
+		io.WriteString(encoded, "owned Brotli body")
+		encoded.Close()
+	}))
+	defer peer.Close()
 	t1 := &http.Transport{
 		ForceAttemptHTTP2: true,
 	}
@@ -316,7 +378,7 @@ func TestCompressionBrotli(t *testing.T) {
 	c := http.Client{
 		Transport: t1,
 	}
-	req, _ := http.NewRequest("GET", "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding", nil)
+	req, _ := http.NewRequest("GET", peer.URL, nil)
 	req.Header = http.Header{
 		"accept-encoding": {"br"},
 	}
@@ -329,6 +391,11 @@ func TestCompressionBrotli(t *testing.T) {
 	if h := resp.Header.Get("content-encoding"); h == "" || h != "br" {
 		t.Fatalf("Got content-encoding header %v, expected br", h)
 	}
+	body, err := io.ReadAll(http.DecompressBodyByType(resp.Body, "br"))
+	if err != nil || string(body) != "owned Brotli body" {
+		t.Fatalf("decoded Brotli body=%q error=%v", body, err)
+	}
+
 }
 
 const deflateBody = "Content-Encoding: deflate covers both zlib-wrapped and raw deflate streams."
@@ -405,7 +472,6 @@ func TestCompressionZlibDeflate(t *testing.T) {
 }
 
 // Test compression deflate
-//
 func TestCompressionDeflate(t *testing.T) {
 	testCompressionDeflate(t, false)
 }
