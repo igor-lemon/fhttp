@@ -14,6 +14,10 @@ import (
 func TestConfiguredCloneOwnsPolicyAndConnections(t *testing.T) {
 	var connections atomic.Int32
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "complete") }))
+	if err := ConfigureServer(server.Config, &Server{}); err != nil {
+		t.Fatal(err)
+	}
+	server.TLS = server.Config.TLSConfig
 	server.EnableHTTP2 = true
 	server.Config.ConnState = func(_ net.Conn, s http.ConnState) {
 		if s == http.StateNew {

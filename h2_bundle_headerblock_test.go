@@ -1,3 +1,5 @@
+//go:build !nethttpomithttp2
+
 package http
 
 import (
