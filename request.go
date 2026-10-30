@@ -414,12 +414,6 @@ func (r *Request) ProtoAtLeast(major, minor int) bool {
 		r.ProtoMajor == major && r.ProtoMinor >= minor
 }
 
-// emptyHeaderValue reports whether a header that is present carries nothing:
-// no value at all, or one empty string.
-func emptyHeaderValue(vv []string) bool {
-	return len(vv) == 0 || vv[0] == ""
-}
-
 // UserAgent returns the client's User-Agent, if sent in the request.
 func (r *Request) UserAgent() string {
 	return r.Header.Get("User-Agent")

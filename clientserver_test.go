@@ -869,11 +869,11 @@ func testTransportUserAgent(t *testing.T, h2 bool) {
 		},
 		{
 			func(r *Request) { r.Header["User-Agent"] = []string{"single", "or", "multiple"} },
-			`["single"]`,
+			either(`["single" "or" "multiple"]`, `["single"]`),
 		},
 		{
 			func(r *Request) { r.Header.Set("User-Agent", "") },
-			`[]`,
+			either(`[""]`, `[]`),
 		},
 		{
 			func(r *Request) { r.Header["User-Agent"] = nil },
@@ -883,6 +883,7 @@ func testTransportUserAgent(t *testing.T, h2 bool) {
 	for i, tt := range tests {
 		req, _ := NewRequest("GET", cst.ts.URL, nil)
 		tt.setup(req)
+		original := req.Header.Clone()
 		res, err := cst.c.Do(req)
 		if err != nil {
 			t.Errorf("%d. RoundTrip = %v", i, err)
@@ -893,6 +894,9 @@ func testTransportUserAgent(t *testing.T, h2 bool) {
 		if err != nil {
 			t.Errorf("%d. read body = %v", i, err)
 			continue
+		}
+		if !reflect.DeepEqual(req.Header, original) {
+			t.Errorf("caller header changed: %#v", req.Header)
 		}
 		if string(slurp) != tt.want {
 			t.Errorf("%d. body mismatch.\n got: %s\nwant: %s\n", i, slurp, tt.want)
