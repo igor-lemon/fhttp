@@ -513,12 +513,16 @@ func (t *transferWriter) doBodyCopy(dst io.Writer, src io.Reader) (n int64, err 
 //
 // This function is only intended for use in writeBody.
 func (t *transferWriter) unwrapBody() io.Reader {
-	if reflect.TypeOf(t.Body) == nopCloserType {
+	if tp := reflect.TypeOf(t.Body); tp == nopCloserType || tp == nopCloserWriterToType {
 		return reflect.ValueOf(t.Body).Field(0).Interface().(io.Reader)
 	}
 	if r, ok := t.Body.(*readTrackingBody); ok {
 		r.didRead = true
-		return r.ReadCloser
+		body := r.ReadCloser
+		if tp := reflect.TypeOf(body); tp == nopCloserType || tp == nopCloserWriterToType {
+			return reflect.ValueOf(body).Field(0).Interface().(io.Reader)
+		}
+		return body
 	}
 	return t.Body
 }
@@ -1176,9 +1180,8 @@ var nopCloserWriterToType = reflect.TypeOf(io.NopCloser(bytes.NewReader(nil)))
 
 // heldInMemory reports whether r is a body held in memory: a *bytes.Reader, a
 // *bytes.Buffer or a *strings.Reader, as it is or in the io.NopCloser or the
-// readTrackingBody a request's body comes in. isKnownInMemoryReader does not
-// see through the io.NopCloser of any of them, which has had a type of its own
-// since Go 1.20, and is kept as it was for the requests it decides on.
+// readTrackingBody a request's body comes in. io.NopCloser preserves WriterTo
+// on readers that implement it, with a distinct wrapper type since Go 1.20.
 func heldInMemory(r io.Reader) bool {
 	switch r := r.(type) {
 	case *bytes.Reader, *bytes.Buffer, *strings.Reader:
@@ -1208,7 +1211,7 @@ func isKnownInMemoryReader(r io.Reader) bool {
 	case *bytes.Reader, *bytes.Buffer, *strings.Reader:
 		return true
 	}
-	if reflect.TypeOf(r) == nopCloserType {
+	if t := reflect.TypeOf(r); t == nopCloserType || t == nopCloserWriterToType {
 		return isKnownInMemoryReader(reflect.ValueOf(r).Field(0).Interface().(io.Reader))
 	}
 	if r, ok := r.(*readTrackingBody); ok {

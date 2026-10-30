@@ -264,10 +264,16 @@ func TestTransferWriterWriteBodyReaderTypes(t *testing.T) {
 					actualReader = reflect.TypeOf(lr.R)
 				} else {
 					actualReader = reflect.TypeOf(mw.CalledReader)
+					// Go 1.26.10's same upstream fixture accounts for os.File's
+					// zero-copy fallback (go.dev/issue/58808). Keep the exact
+					// embedded reader-type assertion, not just successful copying.
+					if actualReader.Kind() == reflect.Struct && actualReader.PkgPath() == "os" && actualReader.Name() == "fileWithoutWriteTo" {
+						actualReader = actualReader.Field(1).Type
+					}
 				}
 
 				if tc.expectedReader != actualReader {
-					t.Fatalf("got reader %T want %T", actualReader, tc.expectedReader)
+					t.Fatalf("got reader %s want %s", actualReader, tc.expectedReader)
 				}
 			}
 
