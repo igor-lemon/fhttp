@@ -406,10 +406,6 @@ func TestCompressionZlibDeflate(t *testing.T) {
 
 // Test compression deflate
 //
-// NOTE: this currently fails. identifyDeflate only recognises zlib-wrapped
-// streams (first byte 0x78) and has no raw-deflate fallback, and on that
-// fallback path it returns the body after having already consumed two bytes,
-// so the payload comes back both undecoded and truncated by two bytes.
 func TestCompressionDeflate(t *testing.T) {
 	testCompressionDeflate(t, false)
 }

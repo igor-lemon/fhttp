@@ -2693,7 +2693,7 @@ func (rl *clientConnReadLoop) handleResponse(cs *clientStream, f *MetaHeadersFra
 
 	// Make the behavior similar to http1. If DisableCompression is true,
 	// requestedGzip will be set to false
-	if !cs.cc.t.DisableCompression {
+	if cs.requestedGzip {
 		res.Body = http.DecompressBody(res)
 	}
 
