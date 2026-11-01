@@ -665,6 +665,10 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		return err
 	}
 
+	if trace != nil && trace.WriteHeadersStart != nil {
+		trace.WriteHeadersStart(valueOrDefault(r.Method, "GET"))
+	}
+
 	_, err = fmt.Fprintf(w, "%s %s HTTP/1.1\r\n", valueOrDefault(r.Method, "GET"), ruri)
 	if err != nil {
 		return err

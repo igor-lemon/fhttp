@@ -2457,6 +2457,14 @@ func (pc *persistConn) readResponse(rc requestAndChan, trace *httptrace.ClientTr
 		}
 		break
 	}
+	if trace != nil && trace.GotResponseHeaders != nil {
+		trace.GotResponseHeaders(rc.req.Method, resp.StatusCode)
+	}
+	if trace != nil && trace.GotResponseBodyBytes != nil {
+		if b, ok := resp.Body.(*body); ok {
+			b.onRead = func(n int) { trace.GotResponseBodyBytes(rc.req.Method, n) }
+		}
+	}
 	if resp.isProtocolSwitch() {
 		resp.Body = newReadWriteCloserBody(pc.br, pc.conn)
 	}
