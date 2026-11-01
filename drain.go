@@ -141,7 +141,16 @@ func closeOn(ctx context.Context, body io.Closer, timeout time.Duration) func() 
 }
 
 // detach makes body its request's no more, where the transport can.
+// observeBodyReleased marks request ownership complete without changing the
+// concrete body or its independent transport/drainer lifetime.
+func observeBodyReleased(body io.ReadCloser) {
+	if observed, ok := body.(interface{ ResponseBodyReleased() }); ok {
+		observed.ResponseBodyReleased()
+	}
+}
+
 func detach(body io.ReadCloser) {
+	observeBodyReleased(body)
 	if d, ok := body.(interface{ Detach() }); ok {
 		d.Detach()
 	}
@@ -164,7 +173,12 @@ func inBuffer(body io.ReadCloser, limit int64) bool {
 
 // Detach makes the body its request's no more: the request's context or
 // Cancel ending no longer closes the connection under it.
-func (es *bodyEOFSignal) Detach() { es.detached.Store(true) }
+func (es *bodyEOFSignal) ResponseBodyReleased() {
+	if es.onDone != nil {
+		es.onDone()
+	}
+}
+func (es *bodyEOFSignal) Detach() { es.detached.Store(true); es.ResponseBodyReleased() }
 
 // isDetached says whether Detach was called.
 func (es *bodyEOFSignal) isDetached() bool { return es.detached.Load() }

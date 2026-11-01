@@ -112,6 +112,14 @@ type ClientTrace struct {
 	// byte counter: framing, TLS records and other streams are excluded.
 	GotResponseBodyBytes func(method string, n int)
 
+	// GotResponseBodyDone reports encoded-body EOF/error, explicit close, transfer
+	// to a background drainer, or a
+	// final response with no body. It fires once, outside raw body/connection locks.
+	// Detached drainers may keep reporting bytes afterwards. Return promptly and
+	// do not reenter the body from its trace callback.
+	// RoundTrip returning headers alone does not complete a response body.
+	GotResponseBodyDone func(method string)
+
 	// GotFirstResponseByte is called when the first byte of the response
 	// headers is available.
 	GotFirstResponseByte func()

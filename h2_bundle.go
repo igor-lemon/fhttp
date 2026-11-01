@@ -7349,6 +7349,8 @@ type http2ClientConn struct {
 // clientStream is the state for a single HTTP/2 stream. One of these
 // is created for each Transport.RoundTrip call.
 type http2clientStream struct {
+	responseDone sync.Once
+
 	bufPipe     http2pipe // buffered pipe with the flow-controlled response payload
 	bytesRemain int64     // -1 means unknown; owned by transportResponseBody.Read
 	cc          *http2ClientConn
@@ -8196,6 +8198,9 @@ func (cc *http2ClientConn) roundTrip(req *Request) (res *Response, gotErrAfterRe
 
 	cc.wmu.Lock()
 	endStream := !hasBody && !hasTrailers
+	if cs.trace != nil && cs.trace.WriteHeadersStart != nil {
+		cs.trace.WriteHeadersStart(req.Method)
+	}
 	werr := cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs)
 	cc.wmu.Unlock()
 	http2traceWroteHeaders(cs.trace)
@@ -9195,6 +9200,12 @@ func (rl *http2clientConnReadLoop) processHeaders(f *http2MetaHeadersFrame) erro
 		// (nil, nil) special case. See handleResponse docs.
 		return nil
 	}
+	if cs.trace != nil && cs.trace.GotResponseHeaders != nil {
+		cs.trace.GotResponseHeaders(cs.req.Method, res.StatusCode)
+	}
+	if res.Body == http2noBody {
+		cs.observeResponseDone()
+	}
 	cs.resTrailer = &res.Trailer
 	cs.resc <- http2resAndError{res: res}
 
@@ -9351,7 +9362,18 @@ type http2transportResponseBody struct {
 	cs *http2clientStream
 }
 
+func (cs *http2clientStream) observeResponseDone() {
+	if cs.trace != nil && cs.trace.GotResponseBodyDone != nil {
+		cs.responseDone.Do(func() { cs.trace.GotResponseBodyDone(cs.req.Method) })
+	}
+}
+func (b http2transportResponseBody) ResponseBodyReleased() { b.cs.observeResponseDone() }
 func (b http2transportResponseBody) Read(p []byte) (n int, err error) {
+	defer func() {
+		if err != nil {
+			b.cs.observeResponseDone()
+		}
+	}()
 	cs := b.cs
 	cc := cs.cc
 
@@ -9359,6 +9381,9 @@ func (b http2transportResponseBody) Read(p []byte) (n int, err error) {
 		return 0, cs.readErr
 	}
 	n, err = b.cs.bufPipe.Read(p)
+	if n > 0 && cs.trace != nil && cs.trace.GotResponseBodyBytes != nil {
+		cs.trace.GotResponseBodyBytes(cs.req.Method, n)
+	}
 	if cs.bytesRemain != -1 {
 		if int64(n) > cs.bytesRemain {
 			n = int(cs.bytesRemain)
@@ -9420,6 +9445,7 @@ func (b http2transportResponseBody) Read(p []byte) (n int, err error) {
 var http2errClosedResponseBody = errors.New("http2: response body closed")
 
 func (b http2transportResponseBody) Close() error {
+	defer b.cs.observeResponseDone()
 	cs := b.cs
 	cc := cs.cc
 

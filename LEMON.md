@@ -643,3 +643,13 @@ production code and the sandbox policy are unchanged.
   not an approximation of either. New callbacks carry method/status/byte counts
   and compose with caller ClientTrace. Source tests retain informational and
   partial-header negative controls and actual body checks.
+
+- **Response ownership observation** (`ClientTrace.GotResponseBodyDone`): one
+  notification on terminal Read, explicit Close, no-body completion or transfer
+  to `DrainBody`; protocol streams and background drainers keep their existing
+  independent lifetime and concrete body types. Decoder wrappers forward
+  `ResponseBodyReleased` without adding detachment behavior. Callbacks run
+  outside body/connection locks. The maintained automatic H2 bundle now mirrors
+  the separate H2 implementation for all three timing/activity hooks and this
+  completion hook. Tests hold body suffixes across header return and ownership
+  transfer, and exercise both H2 APIs plus HTTP/1.1.
