@@ -55,18 +55,38 @@ func (cc *ClientConn) lastReadAt() time.Time {
 	return cc.born.Add(time.Duration(atomic.LoadInt64(&cc.lastRead)))
 }
 
-// prefacePingLocked writes the connection's own PING when it is due. Requires
-// cc.wmu.
-func (cc *ClientConn) prefacePingLocked() {
+// preparePrefacePingLocked decides whether this write queues a PING, before
+// writing HEADERS can let the peer answer. Chrome makes this decision in
+// CreateHeaders; a response to those HEADERS cannot cancel an already queued
+// PING. Requires cc.wmu, like the write that follows.
+func (cc *ClientConn) preparePrefacePingLocked() bool {
 	if cc.pingIdle == 0 {
+		return false
+	}
+	cc.pingMu.Lock()
+	defer cc.pingMu.Unlock()
+	return !cc.pingInFlight && !cc.pingCheckPending && timeNow().Sub(cc.lastReadAt()) > cc.pingIdle
+}
+
+// prefacePingLocked is the decision and emission together, before DATA.
+// HEADERS prepare first, then emit after their own separate write.
+func (cc *ClientConn) prefacePingLocked() {
+	cc.writePrefacePingLocked(cc.preparePrefacePingLocked())
+}
+
+// writePrefacePingLocked emits a prepared PING. Reads arriving after the
+// decision do not retract it; in-flight/pending checks still prevent a second
+// PING. Requires cc.wmu. The timer and ID begin only when it can be written.
+func (cc *ClientConn) writePrefacePingLocked(prepared bool) {
+	if !prepared {
 		return
 	}
 	cc.pingMu.Lock()
-	now := timeNow()
-	if cc.pingInFlight || cc.pingCheckPending || now.Sub(cc.lastReadAt()) <= cc.pingIdle {
+	if cc.pingInFlight || cc.pingCheckPending {
 		cc.pingMu.Unlock()
 		return
 	}
+	now := timeNow()
 	var data [8]byte
 	binary.BigEndian.PutUint64(data[:], cc.nextPingID)
 	cc.nextPingID++
