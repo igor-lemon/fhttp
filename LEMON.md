@@ -630,3 +630,16 @@ length cases verify the exact complete binary body at the owned peer. This is
 a deterministic fhttp dispatch/integrity obligation, not a claim about kernel
 sendfile or browser TCP. All20race repetitions pass under the original sandbox;
 production code and the sandbox policy are unchanged.
+
+## A13 network observation primitives (unreleased engine1)
+
+- ClientTrace exposes protocol write-start, complete final response headers, and
+  positive encoded body-read activity. H1/H2 preserve concrete response bodies;
+ 103, first byte and incomplete HEADERS/CONTINUATION are not final headers.
+- HTTP2 PingRTT observes the connection-owned preface PING from its actual send
+  timestamp to its acknowledgement, outside connection locks. Nil callbacks
+  preserve existing protocol behavior. No browser timer or value is added.
+- Raw transport byte counts and kernel RTT are separate inputs; body activity is
+  not an approximation of either. New callbacks carry method/status/byte counts
+  and compose with caller ClientTrace. Source tests retain informational and
+  partial-header negative controls and actual body checks.
