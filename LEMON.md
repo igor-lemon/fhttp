@@ -653,3 +653,25 @@ production code and the sandbox policy are unchanged.
   the separate H2 implementation for all three timing/activity hooks and this
   completion hook. Tests hold body suffixes across header return and ownership
   transfer, and exercise both H2 APIs plus HTTP/1.1.
+
+
+### Pending engine1 release: preserve a queued preface PING
+
+Chrome156.0.8078.80 calls MaybeSendPrefacePing while creating HEADERS,
+before those HEADERS can be written and answered. Decide with the current
+read/flight/check state at that point, then keep the existing separate PING
+write after HEADERS. A fast response read during HEADERS Write must not
+cancel that prepared PING; a pending check finishing during the write must
+not create one that was not prepared. DATA still decides before its write.
+
+This repairs the existing generic mechanism. All thresholds, IDs, retry and
+GOAWAY choices remain in JSON; no browser-name dispatch or new data default.
+The coordinated root release is still the same unpublished1.0.0/engine1,
+anchored to published0.2.2. No additional engine major is reserved.
+
+The original root PING assertions remain unchanged (150ms/400ms/5s, P1/P2,
+separate34-byte TLS record, GOAWAY/retry). Controlled real Client.Do interleave
+reproduces missing P1 against bd9be71 and keeps it with this fix. Five wire
+controls preserve late-read, disabled, in-flight/check and just-read states.
+Full source-pinned gates and browser evidence are recorded with the root
+release preparation; a local unit pass alone is not browser equivalence.
