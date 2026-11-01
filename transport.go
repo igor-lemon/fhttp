@@ -2251,6 +2251,11 @@ func (pc *persistConn) readLoop() {
 		pc.numExpectedResponses--
 		pc.mu.Unlock()
 
+		var responseDone func()
+		if trace != nil && trace.GotResponseBodyDone != nil {
+			var once sync.Once
+			responseDone = func() { once.Do(func() { trace.GotResponseBodyDone(rc.req.Method) }) }
+		}
 		bodyWritable := resp.bodyIsWritable()
 		hasBody := rc.req.Method != "HEAD" && resp.ContentLength != 0
 
@@ -2262,6 +2267,12 @@ func (pc *persistConn) readLoop() {
 		}
 
 		if !hasBody || bodyWritable {
+			if !hasBody && responseDone != nil {
+				responseDone()
+			}
+			if rw, ok := resp.Body.(*readWriteCloserBody); ok {
+				rw.onDone = responseDone
+			}
 			replaced := pc.t.replaceReqCanceler(rc.cancelKey, nil)
 
 			// Put the idle conn back into the pool before we send the response
@@ -2293,7 +2304,8 @@ func (pc *persistConn) readLoop() {
 
 		waitForBodyRead := make(chan bool, 2)
 		body := &bodyEOFSignal{
-			body: resp.Body,
+			body:   resp.Body,
+			onDone: responseDone,
 			earlyCloseFn: func() error {
 				waitForBodyRead <- false
 				<-eofc // will be closed by deferred call at the end of the function
@@ -2509,12 +2521,33 @@ func newReadWriteCloserBody(br *bufio.Reader, rwc io.ReadWriteCloser) io.ReadWri
 // the concrete type for a Response.Body on the 101 Switching
 // Protocols response, as used by WebSockets, h2c, etc.
 type readWriteCloserBody struct {
+	onDone func()
+
 	_  incomparable
 	br *bufio.Reader // used until empty
 	io.ReadWriteCloser
 }
 
+func (b *readWriteCloserBody) ResponseBodyReleased() {
+	if b.onDone != nil {
+		b.onDone()
+	}
+}
+
+func (b *readWriteCloserBody) Close() error {
+	err := b.ReadWriteCloser.Close()
+	if b.onDone != nil {
+		b.onDone()
+	}
+	return err
+}
+
 func (b *readWriteCloserBody) Read(p []byte) (n int, err error) {
+	defer func() {
+		if err != nil && b.onDone != nil {
+			b.onDone()
+		}
+	}()
 	if b.br != nil {
 		if n := b.br.Buffered(); len(p) > n {
 			p = p[:n]
@@ -2905,6 +2938,8 @@ func canonicalAddr(url *url.URL) string {
 // seen, earlyCloseFn is called instead of fn, and its return value is
 // the return value from Close.
 type bodyEOFSignal struct {
+	onDone func() // immutable once-only closure, invoked outside mu
+
 	body         io.ReadCloser
 	mu           sync.Mutex        // guards following 4 fields
 	closed       bool              // whether Close has been called
@@ -2919,6 +2954,11 @@ type bodyEOFSignal struct {
 var errReadOnClosedResBody = errors.New("http: read on closed response body")
 
 func (es *bodyEOFSignal) Read(p []byte) (n int, err error) {
+	defer func() {
+		if err != nil && es.onDone != nil {
+			es.onDone()
+		}
+	}()
 	es.mu.Lock()
 	closed, rerr := es.closed, es.rerr
 	es.mu.Unlock()
@@ -2942,6 +2982,11 @@ func (es *bodyEOFSignal) Read(p []byte) (n int, err error) {
 }
 
 func (es *bodyEOFSignal) Close() error {
+	defer func() {
+		if es.onDone != nil {
+			es.onDone()
+		}
+	}()
 	es.mu.Lock()
 	defer es.mu.Unlock()
 	if es.closed {
@@ -3302,3 +3347,11 @@ func looksLikeZlib(header [2]byte) bool {
 func identifyDeflate(body io.ReadCloser) io.ReadCloser {
 	return &deflateReader{body: body}
 }
+
+func (r *gzipReader) ResponseBodyReleased() { observeBodyReleased(r.body) }
+
+func (r *brReader) ResponseBodyReleased() { observeBodyReleased(r.body) }
+
+func (r *zstdReader) ResponseBodyReleased() { observeBodyReleased(r.body) }
+
+func (r *deflateReader) ResponseBodyReleased() { observeBodyReleased(r.body) }

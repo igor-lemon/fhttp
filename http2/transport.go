@@ -497,6 +497,8 @@ type ClientConn struct {
 // clientStream is the state for a single HTTP/2 stream. One of these
 // is created for each Transport.RoundTrip call.
 type clientStream struct {
+	responseDone sync.Once
+
 	bufPipe     pipe  // buffered pipe with the flow-controlled response payload
 	bytesRemain int64 // -1 means unknown; owned by transportResponseBody.Read
 	cc          *ClientConn
@@ -2595,6 +2597,9 @@ func (rl *clientConnReadLoop) processHeaders(f *MetaHeadersFrame) error {
 	if cs.trace != nil && cs.trace.GotResponseHeaders != nil {
 		cs.trace.GotResponseHeaders(cs.req.Method, res.StatusCode)
 	}
+	if res.Body == noBody {
+		cs.observeResponseDone()
+	}
 	cs.resTrailer = &res.Trailer
 	cs.resc <- resAndError{res: res}
 
@@ -2765,6 +2770,7 @@ type transportResponseBody struct {
 // Detach makes the body its request's no more: the request's context or
 // Cancel ending no longer resets the stream under it (http.DrainBody).
 func (b transportResponseBody) Detach() {
+	defer b.cs.observeResponseDone()
 	cc := b.cs.cc
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
@@ -2782,7 +2788,20 @@ func (b transportResponseBody) Leave() {
 	cc.undependLocked(b.cs.ID)
 }
 
+func (b transportResponseBody) ResponseBodyReleased() { b.cs.observeResponseDone() }
+
+func (cs *clientStream) observeResponseDone() {
+	if cs.trace != nil && cs.trace.GotResponseBodyDone != nil {
+		cs.responseDone.Do(func() { cs.trace.GotResponseBodyDone(cs.req.Method) })
+	}
+}
+
 func (b transportResponseBody) Read(p []byte) (n int, err error) {
+	defer func() {
+		if err != nil {
+			b.cs.observeResponseDone()
+		}
+	}()
 	cs := b.cs
 	cc := cs.cc
 
@@ -2881,6 +2900,7 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 var errClosedResponseBody = errors.New("http2: response body closed")
 
 func (b transportResponseBody) Close() error {
+	defer b.cs.observeResponseDone()
 	cs := b.cs
 	cc := cs.cc
 
