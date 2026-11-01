@@ -1678,6 +1678,7 @@ func (cc *ClientConn) awaitOpenSlotForRequest(req *http.Request) error {
 
 // requires cc.wmu be held
 func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize int, hdrs []byte, priority PriorityParam) error {
+	preparedPing := cc.preparePrefacePingLocked()
 	if limit := int(cc.t.MaxHeaderFramePayload); limit > 0 && limit < maxFrameSize {
 		maxFrameSize = limit
 	}
@@ -1734,8 +1735,8 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 	// rare, but this should probably be in a goroutine.
 	cc.bw.Flush()
 	if cc.werr == nil {
-		// The connection's own PING goes after the HEADERS, as Chrome's.
-		cc.prefacePingLocked()
+		// The already prepared PING goes after the HEADERS, as Chrome's.
+		cc.writePrefacePingLocked(preparedPing)
 	}
 
 	return cc.werr
