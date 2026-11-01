@@ -71,6 +71,7 @@ func (cc *ClientConn) prefacePingLocked() {
 	binary.BigEndian.PutUint64(data[:], cc.nextPingID)
 	cc.nextPingID++
 	cc.pingInFlight = true
+	cc.pingSentAt = now
 	if cc.pingHung > 0 {
 		cc.pingCheckPending = true
 		time.AfterFunc(cc.pingHung, func() { cc.checkPrefacePing(now) })
@@ -82,12 +83,12 @@ func (cc *ClientConn) prefacePingLocked() {
 
 // prefacePingAnswered takes an acknowledgement as the answer to the
 // connection's own PING, when one is unanswered.
-func (cc *ClientConn) prefacePingAnswered() bool {
+func (cc *ClientConn) prefacePingAnswered() (time.Duration, bool) {
 	cc.pingMu.Lock()
 	defer cc.pingMu.Unlock()
 	answered := cc.pingInFlight
 	cc.pingInFlight = false
-	return answered
+	return timeNow().Sub(cc.pingSentAt), answered
 }
 
 // checkPrefacePing looks at the connection's own PING; lastCheck is when it

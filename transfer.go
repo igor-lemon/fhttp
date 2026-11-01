@@ -893,6 +893,8 @@ func fixTrailer(header Header, chunked bool) (Header, error) {
 // Close ensures that the body has been fully read
 // and then reads the trailer if necessary.
 type body struct {
+	onRead func(int) // immutable client response activity hook, called outside mu
+
 	src          io.Reader
 	hdr          interface{}   // non-nil (Response or Request) value means read trailer
 	r            *bufio.Reader // underlying wire-format reader for the trailer
@@ -914,7 +916,12 @@ var ErrBodyReadAfterClose = errors.New("http: invalid Read on closed Body")
 
 func (b *body) Read(p []byte) (n int, err error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer func() {
+		b.mu.Unlock()
+		if n > 0 && b.onRead != nil {
+			b.onRead(n)
+		}
+	}()
 	if b.closed {
 		return 0, ErrBodyReadAfterClose
 	}

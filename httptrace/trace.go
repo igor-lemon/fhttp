@@ -102,6 +102,16 @@ type ClientTrace struct {
 	// For HTTP/2, this hook is not currently used.
 	PutIdleConn func(err error)
 
+	// GotResponseHeaders is called once complete final response headers have
+	// been parsed, before body I/O. Informational responses do not trigger it.
+	// Method identifies internal CONNECT attempts separately from origin requests.
+	GotResponseHeaders func(method string, statusCode int)
+
+	// GotResponseBodyBytes reports positive reads of the encoded response body,
+	// before content decoding. It is an activity timestamp edge, not a socket
+	// byte counter: framing, TLS records and other streams are excluded.
+	GotResponseBodyBytes func(method string, n int)
+
 	// GotFirstResponseByte is called when the first byte of the response
 	// headers is available.
 	GotFirstResponseByte func()
@@ -148,6 +158,10 @@ type ClientTrace struct {
 	// each request header. At the time of this call the values
 	// might be buffered and not yet written to the network.
 	WroteHeaderField func(key string, value []string)
+
+	// WriteHeadersStart is called when this attempt starts writing its
+	// request headers to the protocol writer, after connection setup and before request body I/O.
+	WriteHeadersStart func(method string)
 
 	// WroteHeaders is called after the Transport has written
 	// all request headers.

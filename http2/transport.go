@@ -59,6 +59,11 @@ const (
 // A Transport internally caches connections to servers. It is safe
 // for concurrent use by multiple goroutines.
 type Transport struct {
+	// PingRTT observes an acknowledged connection-owned preface PING. It is
+	// called by the read loop outside connection locks, with no synthesized
+	// samples for unacknowledged PINGs. It must return promptly.
+	PingRTT func(remote net.Addr, rtt time.Duration)
+
 	// ChromeBehavior selects measured Chromium edge-response policies.
 	ChromeBehavior bool // Deprecated compatibility input.
 	Behavior       behavior.Policy
@@ -469,6 +474,7 @@ type ClientConn struct {
 	pingMu           sync.Mutex
 	nextPingID       uint64
 	pingInFlight     bool
+	pingSentAt       time.Time
 	pingCheckPending bool
 
 	// The streams a new stream's HEADERS may depend on (dependency.go):
@@ -1492,6 +1498,9 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 		}
 	}()
 
+	if cs.trace != nil && cs.trace.WriteHeadersStart != nil {
+		cs.trace.WriteHeadersStart(req.Method)
+	}
 	cc.wmu.Lock()
 	endStream := !hasBody && !hasTrailers
 	werr := cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs, cc.dependOnLocked(cs.ID, cc.headerPriority(req)))
@@ -2569,6 +2578,9 @@ func (rl *clientConnReadLoop) processHeaders(f *MetaHeadersFrame) error {
 		// (nil, nil) special case. See handleResponse docs.
 		return nil
 	}
+	if cs.trace != nil && cs.trace.GotResponseHeaders != nil {
+		cs.trace.GotResponseHeaders(cs.req.Method, res.StatusCode)
+	}
 	cs.resTrailer = &res.Trailer
 	cs.resc <- resAndError{res: res}
 
@@ -2764,6 +2776,9 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 		return 0, cs.readErr
 	}
 	n, err = b.cs.bufPipe.Read(p)
+	if n > 0 && cs.trace != nil && cs.trace.GotResponseBodyBytes != nil {
+		cs.trace.GotResponseBodyBytes(cs.req.Method, n)
+	}
 	if cs.bytesRemain != -1 {
 		if int64(n) > cs.bytesRemain {
 			n = int(cs.bytesRemain)
@@ -3278,14 +3293,17 @@ func (rl *clientConnReadLoop) processPing(f *PingFrame) error {
 	if f.IsAck() {
 		cc := rl.cc
 		cc.mu.Lock()
-		defer cc.mu.Unlock()
-		// If ack, notify listener if any
 		if c, ok := cc.pings[f.Data]; ok {
 			close(c)
 			delete(cc.pings, f.Data)
-		} else if cc.prefacePingAnswered() {
-			// The connection's own PING, whatever the acknowledgement
-			// says, as Chrome takes it.
+			cc.mu.Unlock()
+			return nil
+		}
+		cc.mu.Unlock()
+		if rtt, answered := cc.prefacePingAnswered(); answered {
+			if cc.t.PingRTT != nil {
+				cc.t.PingRTT(cc.tconn.RemoteAddr(), rtt)
+			}
 		} else if cc.t.policy().Flag("h2.reject_unsolicited_ping_ack") {
 			return ConnectionError(ErrCodeProtocol)
 		}
