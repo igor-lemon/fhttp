@@ -456,6 +456,13 @@ type ClientConn struct {
 	connFlow   uint32
 	streamFlow uint32
 
+	// The turn to encode and write a header block (headerturn.go), made at
+	// first use, and whether a block is encoded and not yet written (guarded
+	// by mu).
+	headerTurnOnce sync.Once
+	headerTurn     chan struct{}
+	writingHeaders bool
+
 	// Under WindowUpdateDelay: what was freed of the connection's window and
 	// the peer not told of, and when it was last told or the connection
 	// began. Guarded by mu.
@@ -476,6 +483,9 @@ type ClientConn struct {
 	pingInFlight     bool
 	pingSentAt       time.Time
 	pingCheckPending bool
+	// pingFailed is a connection given up for its unanswered PING: a write
+	// that fails after it fails with it (writeFailure).
+	pingFailed atomic.Bool
 
 	// The streams a new stream's HEADERS may depend on (dependency.go):
 	// whether they are chosen as Chrome's, and, guarded by mu, the open
@@ -1461,10 +1471,9 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	}
 	hasTrailers := trailers != ""
 
-	cc.mu.Lock()
-	if err := cc.awaitOpenSlotForRequest(req); err != nil {
-		cc.mu.Unlock()
-
+	// The connection's turn to write a header block, and cc.mu, which is let
+	// go of before the block waits for the connection's writes (headerturn.go).
+	if err := cc.takeHeaderSlot(req); err != nil {
 		return nil, false, err
 	}
 
@@ -1479,6 +1488,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	hdrs, err := cc.encodeHeaders(sent, requestedGzip, trailers, contentLen)
 	if err != nil {
 		cc.mu.Unlock()
+		cc.giveHeaderTurn()
 
 		return nil, false, err
 	}
@@ -1490,6 +1500,10 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	cs.requestedGzip = requestedGzip
 	bodyWriter := cc.t.getBodyWriterState(cs, body)
 	cs.on100 = bodyWriter.on100
+	priority := cc.dependOnLocked(cs.ID, cc.headerPriority(req))
+	maxFrameSize := int(cc.maxFrameSize)
+	cc.writingHeaders = true
+	cc.mu.Unlock()
 
 	defer func() {
 		cc.wmu.Lock()
@@ -1503,25 +1517,39 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	if cs.trace != nil && cs.trace.WriteHeadersStart != nil {
 		cs.trace.WriteHeadersStart(req.Method)
 	}
-	cc.wmu.Lock()
 	endStream := !hasBody && !hasTrailers
-	werr := cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs, cc.dependOnLocked(cs.ID, cc.headerPriority(req)))
+	cc.wmu.Lock()
+	ended := cs.endedUnwritten()
+	var werr error
+	if ended == nil {
+		werr = cc.writeHeaders(cs.ID, endStream, maxFrameSize, hdrs, priority)
+	}
 	cc.wmu.Unlock()
-	traceWroteHeaders(cs.trace)
-	cc.mu.Unlock()
+	cc.headersWritten()
+	if ended == nil {
+		traceWroteHeaders(cs.trace)
+	}
 	cc.startReadLoop()
 
-	if werr != nil {
+	if ended == nil && werr != nil {
+		// A stream the connection ended while its HEADERS were written
+		// ended with what ended the connection: the write that failed
+		// with it, cut short, is not the cause.
+		if ended = cs.endedByConn(); ended == nil {
+			ended = cc.writeFailure(cs, werr)
+		}
+	}
+	if ended != nil {
 		if hasBody {
 			req.Body.Close() // per RoundTripper contract
 			bodyWriter.cancel()
 		}
 		cc.forgetStreamID(cs.ID)
-		// Don't bother sending a RST_STREAM (our write already failed;
-		// no need to keep writing)
-		traceWroteRequest(cs.trace, werr)
+		// Don't bother sending a RST_STREAM (our write already failed, or
+		// the stream's HEADERS never went; no need to keep writing)
+		traceWroteRequest(cs.trace, ended)
 
-		return nil, false, lost(cs, werr)
+		return nil, false, ended
 	}
 
 	var respHeaderTimer <-chan time.Time
@@ -1619,7 +1647,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 			if err != nil {
 				cc.forgetStreamID(cs.ID)
 
-				return nil, cs.getStartedWrite(), lost(cs, err)
+				return nil, cs.getStartedWrite(), cc.writeFailure(cs, err)
 			}
 			if d := cc.responseHeaderTimeout(); d != 0 {
 				timer := time.NewTimer(d)
@@ -1933,15 +1961,24 @@ func (cs *clientStream) writeRequestBody(body io.Reader, bodyCloser io.Closer) (
 
 	var trls []byte
 	if hasTrailers {
+		// The trailers are a header block, encoded and written in the
+		// connection's turn (headerturn.go).
+		if err := cc.takeHeaderTurn(req); err != nil {
+			return err
+		}
 		cc.mu.Lock()
 		trls, err = cc.encodeTrailers(req)
+		cc.writingHeaders = err == nil
 		cc.mu.Unlock()
 		if err != nil {
+			cc.giveHeaderTurn()
 			cc.writeStreamReset(cs.ID, ErrCodeInternal, err)
 			cc.forgetStreamID(cs.ID)
 
 			return err
 		}
+		// After cc.wmu is let go of, below.
+		defer cc.headersWritten()
 	}
 
 	cc.wmu.Lock()
@@ -3140,6 +3177,12 @@ func (rl *clientConnReadLoop) processSettings(f *SettingsFrame) error {
 		return ConnectionError(ErrCodeProtocol)
 	}
 
+	// A header block encoded and not yet written goes before the encoder
+	// takes the peer's settings: it was encoded for the table the peer had
+	// before them, and its acknowledgement goes after it (headerturn.go).
+	for cc.writingHeaders {
+		cc.cond.Wait()
+	}
 	err := f.ForeachSetting(cc.applySetting)
 	if err != nil {
 		return err
