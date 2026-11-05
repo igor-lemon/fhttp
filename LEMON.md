@@ -737,3 +737,20 @@ Tests in `http2/headerturn_test.go` (a `heldConn` holds the client's writes):
 - the reader waits for a held write.
 
 Nine mutants, all killed. The whole `http2` suite passes.
+
+### Pending engine1 release: a header value it refuses is not quoted
+
+The 2026-11-05 review found a header value no server may be sent (a control
+byte in it) quoted whole in the error: `invalid HTTP header value "Bearer
+…\x01" for header "Authorization"` (HTTP/2, `http2/transport.go` and
+`h2_bundle.go`) and `net/http: invalid header field value "…" for Key
+Authorization` (HTTP/1.1, `transport.go`). tls-forge hands that error to
+standard error, its log and the daemon's answer, and such a value is most
+likely a credential pasted with a stray byte. Each now names the field
+alone, as x/net (`invalid HTTP header value for header %q`) and net/http
+(`net/http: invalid header field value for %q`, "because it may be
+sensitive") say it. `TestTransportFailsOnInvalidHeaders` and
+`TestTransportClosesBodyOnInvalidRequests` hold the wording; tls-forge's
+`TestAHeaderValueThatCannotBeSentIsNotQuoted` the error and the log, over
+both protocols. The bundle's check is not reached through `Transport`, which
+refuses the value first.
