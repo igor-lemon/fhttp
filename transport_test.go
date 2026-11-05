@@ -6122,10 +6122,11 @@ func TestTransportClosesBodyOnInvalidRequests(t *testing.T) {
 			name: "invalid header value",
 			req: &Request{
 				Method: "POST",
-				Header: Header{"Key": {"\x19"}},
+				Header: Header{"Key": {"SECRET\x19"}},
 				URL:    u,
 			},
-			wantErr: "invalid header field value",
+			// Not the value, which may be a credential.
+			wantErr: `net/http: invalid header field value for "Key"`,
 		},
 		{
 			name: "non HTTP(s) scheme",
