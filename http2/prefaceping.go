@@ -131,21 +131,35 @@ func (cc *ClientConn) checkPrefacePing(lastCheck time.Time) {
 	cc.pingMu.Unlock()
 }
 
+// writeFailure is what a request whose write failed with err ends with: the
+// PING's failure on a connection given up for it, whose writes fail because
+// it was (the deadline closeForFailedPing gives them, its close), even before
+// its streams are failed; else the write's failure (lost).
+func (cc *ClientConn) writeFailure(cs *clientStream, err error) error {
+	if cc.pingFailed.Load() {
+		return errPrefacePingFailed
+	}
+	return lost(cs, err)
+}
+
 // closeForFailedPing gives the connection up. Its streams fail first, so that
 // their requests may go again on another connection while the GOAWAY is
 // written, as Chrome's do: its session ends its streams before its write
 // loop writes the GOAWAY.
 func (cc *ClientConn) closeForFailedPing() {
 	cc.startReadLoop()
+	cc.pingFailed.Store(true)
+	// A write the connection holds up, under cc.wmu, gives up within the
+	// time the PING was given; the GOAWAY, which Chrome writes after it,
+	// then goes no more than Chrome's would. The deadline is set before
+	// cc.mu is asked for: what waits for the held write may hold cc.mu (the
+	// read loop's WINDOW_UPDATE and SETTINGS acknowledgement).
+	cc.tconn.SetWriteDeadline(time.Now().Add(cc.pingHung))
 	cc.mu.Lock()
 	cc.failStreamsLocked(errPrefacePingFailed)
 	cc.cond.Broadcast()
 	cc.mu.Unlock()
 	if p := cc.t.policy(); p.Has("h2.preface_ping_failed_goaway_code") {
-		// A write the connection holds up, under cc.wmu, gives up within
-		// the time the PING was given; the GOAWAY, which Chrome writes after
-		// it, then goes no more than Chrome's would.
-		cc.tconn.SetWriteDeadline(time.Now().Add(cc.pingHung))
 		cc.wmu.Lock()
 		cc.fr.WriteGoAway(0, ErrCode(p.Uint("h2.preface_ping_failed_goaway_code")), []byte(p.Text("h2.preface_ping_failed_goaway_debug")))
 		cc.bw.Flush()

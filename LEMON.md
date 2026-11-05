@@ -675,3 +675,65 @@ reproduces missing P1 against bd9be71 and keeps it with this fix. Five wire
 controls preserve late-read, disabled, in-flight/check and just-read states.
 Full source-pinned gates and browser evidence are recorded with the root
 release preparation; a local unit pass alone is not browser equivalence.
+
+### Pending engine1 release: a write the peer does not take holds up nothing else
+
+The 2026-11-05 review found that a request whose HEADERS waited for a write
+the peer did not take (an upload's DATA under `cc.wmu`) held `cc.mu` while it
+waited, as x/net's `roundTrip` did before it made the same change. With
+`cc.mu` held, `closeForFailedPing` never set the write deadline that frees
+the held write, so the connection was never given up. Every request on it
+hung past its own deadline. The pool, which asks each connection under its
+own lock whether it takes a request (`idleState`, `coalesceLocked`), held up
+every HTTP/2 request of the transport, other hosts' included.
+
+How it works now (`http2/headerturn.go`):
+
+- **Header blocks go in turn.** Encoding and writing a block takes the
+  connection's turn, a one-slot channel that a request waits for only as
+  long as it is wanted (its context, `Request.Cancel`). The turn keeps
+  stream IDs in order, and keeps a block written before the next one is
+  encoded. `cc.mu` is let go before the block waits for `cc.wmu`.
+- **Trailers take the turn too.** A request waits for a stream slot without
+  the turn (`takeHeaderSlot`), because the trailers that end the stream it
+  waits for need it.
+- **SETTINGS wait for a block in flight.** `processSettings` waits for a
+  block encoded and not yet written (`writingHeaders`) before the encoder
+  takes the peer's settings. Before, `cc.mu` was held from encode to write,
+  which gave the same ordering.
+- **No HEADERS for a stream already ended.** A stream whose request is no
+  longer wanted, or which the connection ended while its HEADERS waited
+  (given up, gone away), sends no HEADERS (`endedUnwritten`). Chrome takes a
+  frame not yet written out of its queue.
+- **The deadline comes first.** `closeForFailedPing` sets the write deadline
+  before asking for `cc.mu`. The read loop's WINDOW_UPDATE and SETTINGS
+  acknowledgement hold `cc.mu` while they wait for `cc.wmu`.
+- **Write failures name the PING.** A write that fails on a connection given
+  up for its PING fails with the PING's failure (`pingFailed`,
+  `writeFailure`), so the request goes again as "ping-failed".
+
+Not changed, and bounded only by the PING:
+
+- the read loop and a response body's `Close` still hold `cc.mu` while they
+  wait for `cc.wmu`;
+- the request whose HEADERS wait right behind the held write ends within
+  `h2.preface_ping_hung_ms` after the PING fails, where Chrome's ends at once.
+
+No JSON value or browser branch is added. This is the same unpublished
+engine1.
+
+Tests in `http2/headerturn_test.go` (a `heldConn` holds the client's writes):
+
+- the connection still answers whether it takes a request, a request no
+  longer wanted leaves its turn, and every request ends with the PING;
+- no HEADERS go for a request cancelled while it waited;
+- another host's request and the pool are not held up;
+- 64 requests at once, half of them with trailers, on one connection to a
+  strict decoder;
+- trailers end the stream another request waits for;
+- a block that cannot be encoded gives the turn back;
+- SETTINGS wait for a block encoded before them;
+- a request's own HEADERS are held;
+- the reader waits for a held write.
+
+Nine mutants, all killed. The whole `http2` suite passes.
