@@ -2483,9 +2483,10 @@ func TestTransportFailsOnInvalidHeaders(t *testing.T) {
 			h:       http.Header{"имя": {"Brad"}},
 			wantErr: `invalid HTTP header name "имя"`,
 		},
+		// Not the value, which may be a credential.
 		3: {
 			h:       http.Header{"foo": {"foo\x01bar"}},
-			wantErr: `invalid HTTP header value "foo\x01bar" for header "foo"`,
+			wantErr: `invalid HTTP header value for header "foo"`,
 		},
 	}
 
