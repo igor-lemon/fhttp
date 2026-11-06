@@ -623,3 +623,49 @@ func TestAClientConnSaysWhatItsConnectionSaid(t *testing.T) {
 		t.Fatalf("got %T %v, want %v or the connection's reset", err, err, io.ErrUnexpectedEOF)
 	}
 }
+
+// spentBody is a body without GetBody that gives nothing once closed, as a
+// pipe or a file does not give its bytes again.
+type spentBody struct {
+	r      io.Reader
+	closed atomic.Bool
+}
+
+func (b *spentBody) Read(p []byte) (int, error) {
+	if b.closed.Load() {
+		return 0, io.EOF
+	}
+	return b.r.Read(p)
+}
+
+func (b *spentBody) Close() error { b.closed.Store(true); return nil }
+
+// TestABodyAnAttemptClosedIsNotSentAgainEmpty: a POST whose HEADERS a reused
+// connection took no more, its body closed as the RoundTripper contract says
+// and with no GetBody to have it again, fails saying so. It went again before,
+// its body empty.
+func TestABodyAnAttemptClosedIsNotSentAgainEmpty(t *testing.T) {
+	clients, servers := pairs(t, 2)
+	failing := &failingWrites{Conn: clients[0]}
+	tr, _ := pingTransport(t, resendPolicy(t, chromeRetries, nil), failing, clients[1])
+	a, b := newPeer(t, servers[0]), newPeer(t, servers[1])
+	exchange(t, tr, a, false, "H1e")
+	failing.arm(0)
+	// Within a deadline: sent again empty, the request waits for an answer the
+	// peer never gives.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://dummy.tld/", &spentBody{r: strings.NewReader("x")})
+	req.GetBody = nil
+	_, err := tr.RoundTrip(req)
+	if err == nil || !strings.Contains(err.Error(), "after Request.Body was closed") {
+		t.Fatalf("RoundTrip = %v", err)
+	}
+	select {
+	case s, ok := <-b.seen:
+		if ok && s.kind == FrameHeaders {
+			t.Errorf("the request went again: %v", s)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+}

@@ -730,12 +730,19 @@ func TestRewound(t *testing.T) {
 		err     string
 	}{
 		{"no body", plain, true, true, ""},
-		{"not begun", unread, false, true, ""},
-		{"begun", unread, true, false, "define Request.GetBody"},
+		// Not begun, the attempt closed it: sent again it would go empty.
+		{"not begun", unread, false, false, "after Request.Body was closed"},
+		{"begun", unread, true, false, "after Request.Body was written"},
 		{"GetBody", given, true, false, ""},
 		{"GetBody fails", broken, true, false, "GetBody failed"},
 	} {
 		got, err := rewound(tc.req, errPrefacePingFailed, tc.written)
+		if tc.name == "not begun" {
+			// A connection that could take no stream: the body untouched.
+			if again, err := rewound(tc.req, errClientConnUnusable, false); err != nil || again != tc.req {
+				t.Errorf("unusable: %v, the same request %v", err, again == tc.req)
+			}
+		}
 		if tc.err != "" {
 			if err == nil || !strings.Contains(err.Error(), tc.err) {
 				t.Errorf("%s: %v, want %q", tc.name, err, tc.err)
