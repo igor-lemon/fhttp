@@ -230,7 +230,7 @@ func readResponsePolicy(r *bufio.Reader, req *Request, policy behavior.Policy) (
 
 	fixPragmaCacheControl(resp.Header)
 
-	err = readTransfer(resp, r)
+	err = readTransferAs(resp, r, policy.Flag("h1.chunked_bare_lf"))
 	if err != nil {
 		return nil, err
 	}

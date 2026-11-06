@@ -792,3 +792,16 @@ Request.GetBody". `TestABodyAnAttemptClosedIsNotSentAgainEmpty` (resend_test:
 a POST whose HEADERS a reused connection took no more; the old code timed
 out), `TestRewound`'s rows.
 
+## A chunked answer of LF alone, where the profile says so (review 2026-11-05)
+
+`h1.chunked_bare_lf` (utls registry) has `readResponsePolicy` read a chunked
+body through `internal.NewChunkedReaderBareLF`, as Chromium 156's
+HttpChunkedDecoder reads one: each line ends at LF, a CR before it dropped;
+a size is cut at its extension, then of trailing spaces (a tab is no space);
+a chunk's data ends in an empty line, LF or CRLF; and its trailer's lines too
+(`body.bareLF`, `seeUpcomingEmptyLine`). Without it, RFC 9112's CRLF and
+readChunkLine's refusals, as before, and a request a server reads keeps them
+always. Tests: `internal/chunked_barelf_test.go`, `response_barelf_test.go`;
+14 mutants, 13 killed, one equivalent (an end cut short is the next line's
+ErrUnexpectedEOF).
+
