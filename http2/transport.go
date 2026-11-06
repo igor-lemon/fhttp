@@ -605,7 +605,9 @@ func (cs *clientStream) cancelStream() {
 	cs.didReset = true
 	cc.mu.Unlock()
 
-	if didReset {
+	// One reset a stream, as x/net's: e52a27a turned the test round, so a
+	// request given up sent none and one reset already a second.
+	if !didReset {
 		cc.writeStreamReset(cs.ID, ErrCodeCancel, nil)
 		cc.forgetStreamID(cs.ID)
 	}
@@ -2941,7 +2943,7 @@ func (b transportResponseBody) Close() error {
 	if unread > 0 || !serverSentStreamEnd {
 		cc.mu.Lock()
 		cc.wmu.Lock()
-		if !serverSentStreamEnd && cs.resetErr == nil && !cc.closed {
+		if !serverSentStreamEnd && cs.resetErr == nil && !cs.didReset && !cc.closed {
 			cc.fr.WriteRSTStream(cs.ID, ErrCodeCancel)
 			cs.didReset = true
 		}
