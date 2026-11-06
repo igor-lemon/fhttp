@@ -765,3 +765,17 @@ reset a stream as its caller let go of it. It is written under `cc.mu` now.
 another point of the reset's way each time, 400 times: under `-race` it
 failed with the old code (transport.go 2944 against 3305) and passes. The
 bundled copy (h2_bundle.go) reads no resetErr in Close.
+
+## One RST_STREAM a stream (review 2026-11-05, 1.6)
+
+A body let go of (DrainBody's timer and its goroutine, a 401's, a redirect's,
+a preflight's) was closed twice, and each Close reset its stream: two
+RST_STREAM(CANCEL) where Chrome sends one. Both Close paths
+(`transportResponseBody.Close`, and `closeBody` under WindowUpdateDelay) now
+reset only a stream not reset yet (`cs.didReset`). And `cancelStream` had its
+test turned round since e52a27a (2021, "Fixed push requests to an acceptable
+degree"): a request given up mid-body sent no reset, and one reset already a
+second; it is x/net's again, one reset as it is given up.
+`http2/onereset_test.go` (two Closes with and without WindowUpdateDelay, a
+cancel, DrainBody's timer); 4 mutants killed.
+
