@@ -537,6 +537,11 @@ type clientStream struct {
 	reused   bool
 	informed atomic.Bool
 
+	// sentEndStream is set once the request's END_STREAM is written: with its
+	// HEADERS, its body's last DATA frame, or its trailers; peerEnded once
+	// the read loop has read the answer's.
+	sentEndStream, peerEnded atomic.Bool
+
 	detached      bool  // its body let go of (Detach); guarded by cc.mu
 	readErr       error // sticky read error; owned by transportResponseBody.Read
 	req           *http.Request
@@ -609,6 +614,16 @@ func (cs *clientStream) awaitRequestCancel(req *http.Request) {
 
 func (cs *clientStream) cancelStream() {
 	cc := cs.cc
+	// A stream ended on both sides, its request written whole and its
+	// answer's END_STREAM read, is reset by no one (x/net's
+	// cleanupWriteRequest: "closed cleanly on both sides, there is no
+	// error"). A request's context ends as its caller is done with it, as its
+	// body is closed (whose Close resets none such) or before: a reset written
+	// then is one Chrome never sends, and a write in flight as the connection
+	// is closed keeps the TLS close_notify from going.
+	if cs.sentEndStream.Load() && cs.peerEnded.Load() {
+		return
+	}
 	cc.mu.Lock()
 	didReset := cs.didReset
 	cs.didReset = true
@@ -1542,6 +1557,9 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	var werr error
 	if ended == nil {
 		werr = cc.writeHeaders(cs.ID, endStream, maxFrameSize, hdrs, priority)
+		if werr == nil && endStream {
+			cs.sentEndStream.Store(true)
+		}
 	}
 	cc.wmu.Unlock()
 	cc.headersWritten()
@@ -1964,6 +1982,9 @@ func (cs *clientStream) writeRequestBody(body io.Reader, bodyCloser io.Closer) (
 				// If we change this, see comment below.
 				err = cc.bw.Flush()
 			}
+			if err == nil && sentEnd {
+				cs.sentEndStream.Store(true)
+			}
 			cc.wmu.Unlock()
 		}
 		if err != nil {
@@ -2012,6 +2033,9 @@ func (cs *clientStream) writeRequestBody(body io.Reader, bodyCloser io.Closer) (
 	}
 	if ferr := cc.bw.Flush(); ferr != nil && err == nil {
 		err = ferr
+	}
+	if err == nil {
+		cs.sentEndStream.Store(true)
 	}
 
 	return err
@@ -2582,6 +2606,7 @@ func (rl *clientConnReadLoop) processHeaders(f *MetaHeadersFrame) error {
 	}
 	if f.StreamEnded() {
 		cs.gotEndStream = true
+		cs.peerEnded.Store(true)
 		// The stream is over, as Chrome's network stack closes one before
 		// its answer reaches whoever waits for it, who may send another at
 		// once (a redirect's next hop): what is sent next depends on it no
@@ -3043,6 +3068,7 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) (err error) {
 	}
 	if f.StreamEnded() {
 		cs.gotEndStream = true
+		cs.peerEnded.Store(true)
 	}
 	if !cs.firstByte {
 		if cc.t.policy().Flag("h2.reset_data_before_headers") {
