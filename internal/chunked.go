@@ -41,20 +41,43 @@ type chunkedReader struct {
 	buf      [2]byte
 	checkEnd bool  // whether need to check for \r\n chunk footer
 	excess   int64 // excessive chunk framing relative to useful data
+	// bareLF reads lines as Chromium's HttpChunkedDecoder does
+	// (NewChunkedReaderBareLF).
+	bareLF bool
+}
+
+// NewChunkedReaderBareLF is NewChunkedReader reading lines as Chromium's
+// HttpChunkedDecoder (156) reads them: each ends at LF, the CR before it
+// dropped where there is one; a chunk's size is cut at its extension and of
+// the spaces after; and the end of a chunk's data is an empty line, LF alone
+// or CRLF. A browser takes such an answer; RFC 9112 asks a server to refuse
+// a request so, which NewChunkedReader does.
+func NewChunkedReaderBareLF(r io.Reader) io.Reader {
+	cr := NewChunkedReader(r).(*chunkedReader)
+	cr.bareLF = true
+	return cr
 }
 
 func (cr *chunkedReader) beginChunk() {
 	// chunk-size CRLF
 	var line []byte
-	line, cr.err = readChunkLine(cr.r)
+	if cr.bareLF {
+		line, cr.err = readBareLFLine(cr.r)
+	} else {
+		line, cr.err = readChunkLine(cr.r)
+	}
 	if cr.err != nil {
 		return
 	}
 	cr.excess += int64(len(line)) + 2
-	line = trimTrailingWhitespace(line)
-	line, cr.err = removeChunkExtension(line)
-	if cr.err != nil {
-		return
+	if cr.bareLF {
+		line, _ = removeChunkExtension(line)
+		line = bytes.TrimRight(line, " ")
+	} else {
+		line = trimTrailingWhitespace(line)
+		if line, cr.err = removeChunkExtension(line); cr.err != nil {
+			return
+		}
 	}
 	cr.n, cr.err = parseHexUint(line)
 	if cr.err != nil {
@@ -85,6 +108,16 @@ func (cr *chunkedReader) chunkHeaderAvailable() bool {
 
 func (cr *chunkedReader) Read(b []uint8) (n int, err error) {
 	for cr.err == nil {
+		if cr.checkEnd && cr.bareLF {
+			if n > 0 && !cr.endAvailable() {
+				break
+			}
+			cr.err = cr.readEnd()
+			if cr.err != nil {
+				break
+			}
+			cr.checkEnd = false
+		}
 		if cr.checkEnd {
 			if n > 0 && cr.r.Buffered() < 2 {
 				// We have some data. Return early (per the io.Reader
@@ -135,6 +168,48 @@ func (cr *chunkedReader) Read(b []uint8) (n int, err error) {
 		}
 	}
 	return n, cr.err
+}
+
+// endAvailable says the end of a chunk's data is all buffered, LF alone or
+// CRLF, so that reading it does not wait.
+func (cr *chunkedReader) endAvailable() bool {
+	peek, _ := cr.r.Peek(cr.r.Buffered())
+	return len(peek) > 0 && (peek[0] == '\n' || len(peek) > 1)
+}
+
+// readEnd reads the end of a chunk's data, an empty line: LF, or CRLF.
+func (cr *chunkedReader) readEnd() error {
+	b, err := cr.r.ReadByte()
+	if err == nil && b == '\r' {
+		b, err = cr.r.ReadByte()
+	}
+	switch {
+	case err == io.EOF:
+		return io.ErrUnexpectedEOF
+	case err != nil:
+		return err
+	case b != '\n':
+		return errors.New("malformed chunked encoding")
+	}
+	return nil
+}
+
+// readBareLFLine reads a line up to its LF, the CR before it dropped, with
+// readChunkLine's bounds.
+func readBareLFLine(b *bufio.Reader) ([]byte, error) {
+	p, err := b.ReadSlice('\n')
+	if err != nil {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		} else if err == bufio.ErrBufferFull {
+			err = ErrLineTooLong
+		}
+		return nil, err
+	}
+	if len(p) >= maxLineLength {
+		return nil, ErrLineTooLong
+	}
+	return bytes.TrimSuffix(p[:len(p)-1], []byte("\r")), nil
 }
 
 // Read a line of bytes (up to \n) from b.

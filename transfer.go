@@ -567,6 +567,12 @@ func suppressedHeaders(status int) []string {
 
 // msg is *Request or *Response.
 func readTransfer(msg interface{}, r *bufio.Reader) (err error) {
+	return readTransferAs(msg, r, false)
+}
+
+// readTransferAs is readTransfer, a chunked body read as Chromium reads one
+// where bareLF says so (internal.NewChunkedReaderBareLF), its trailer too.
+func readTransferAs(msg interface{}, r *bufio.Reader, bareLF bool) (err error) {
 	t := &transferReader{RequestMethod: "GET"}
 
 	// Unify input
@@ -643,7 +649,11 @@ func readTransfer(msg interface{}, r *bufio.Reader) (err error) {
 		if noResponseBodyExpected(t.RequestMethod) || !bodyAllowedForStatus(t.StatusCode) {
 			t.Body = NoBody
 		} else {
-			t.Body = &body{src: internal.NewChunkedReader(r), hdr: msg, r: r, closing: t.Close}
+			src := internal.NewChunkedReader(r)
+			if bareLF {
+				src = internal.NewChunkedReaderBareLF(r)
+			}
+			t.Body = &body{src: src, hdr: msg, r: r, closing: t.Close, bareLF: bareLF}
 		}
 	case realLength == 0:
 		t.Body = NoBody
@@ -900,6 +910,7 @@ type body struct {
 	r            *bufio.Reader // underlying wire-format reader for the trailer
 	closing      bool          // is the connection to be closed after reading body?
 	doEarlyClose bool          // whether Close should stop early
+	bareLF       bool          // its trailer's lines may end in LF alone
 
 	mu         sync.Mutex // guards following, and calls to Read and Close
 	sawEOF     bool
@@ -997,10 +1008,31 @@ func seeUpcomingDoubleCRLF(r *bufio.Reader) bool {
 	return false
 }
 
+// seeUpcomingEmptyLine is seeUpcomingDoubleCRLF of lines that may end in LF
+// alone: an LF, then LF or CRLF.
+func seeUpcomingEmptyLine(r *bufio.Reader) bool {
+	for peekSize := 2; ; peekSize++ {
+		buf, err := r.Peek(peekSize)
+		if bytes.HasSuffix(buf, []byte("\n\n")) || bytes.HasSuffix(buf, []byte("\n\r\n")) {
+			return true
+		}
+		if err != nil {
+			break
+		}
+	}
+	return false
+}
+
 var errTrailerEOF = errors.New("http: unexpected EOF reading trailer")
 
 func (b *body) readTrailer() error {
 	// The common case, since nobody uses trailers.
+	if b.bareLF {
+		if buf, _ := b.r.Peek(1); bytes.Equal(buf, []byte("\n")) {
+			b.r.Discard(1)
+			return nil
+		}
+	}
 	buf, err := b.r.Peek(2)
 	if bytes.Equal(buf, singleCRLF) {
 		b.r.Discard(2)
@@ -1021,7 +1053,7 @@ func (b *body) readTrailer() error {
 	// this bufio.Reader. Instead, a hack: we iteratively Peek up
 	// to the bufio.Reader's max size, looking for a double CRLF.
 	// This limits the trailer to the underlying buffer size, typically 4kB.
-	if !seeUpcomingDoubleCRLF(b.r) {
+	if !seeUpcomingDoubleCRLF(b.r) && !(b.bareLF && seeUpcomingEmptyLine(b.r)) {
 		return errors.New("http: suspiciously long trailer after chunked body")
 	}
 
