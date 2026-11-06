@@ -55,6 +55,16 @@ type Options struct {
 	// secure: it means that the HTTP server for foo.co.uk can set a cookie
 	// for bar.co.uk.
 	PublicSuffixList PublicSuffixList
+
+	// HostOnlyApart keeps a cookie its host's alone apart from a cookie of
+	// the same name, domain and path that is the domain's, as RFC 6265bis
+	// (5.7, step 22) and browsers do: one Set-Cookie without Domain and one
+	// with Domain naming the host, or its parent, are two cookies, each
+	// replaced and removed by its own kind alone, and both sent. A cookie a
+	// domain's is then answered with a Domain that begins with a dot, as a
+	// cookie file writes it, so that the two are told apart. Without it, one
+	// replaces the other, as RFC 6265 (5.3, step 11) has it.
+	HostOnlyApart bool
 }
 
 // Jar implements the http.CookieJar interface from the net/http package.
@@ -71,6 +81,9 @@ type Jar struct {
 	// nextSeqNum is the next sequence number assigned to a new cookie
 	// created SetCookies.
 	nextSeqNum uint64
+
+	// hostOnlyApart is Options.HostOnlyApart.
+	hostOnlyApart bool
 }
 
 // New returns a new cookie jar. A nil *Options is equivalent to a zero
@@ -81,6 +94,7 @@ func New(o *Options) (*Jar, error) {
 	}
 	if o != nil {
 		jar.psList = o.PublicSuffixList
+		jar.hostOnlyApart = o.HostOnlyApart
 	}
 	return jar, nil
 }
@@ -109,8 +123,12 @@ type entry struct {
 	seqNum uint64
 }
 
-// id returns the domain;path;name triple of e as an id.
-func (e *entry) id() string {
+// id returns the domain;path;name triple of e as an id, and where hostOnlyApart
+// says so, whether e is its host's alone.
+func (e *entry) id(hostOnlyApart bool) string {
+	if hostOnlyApart && e.HostOnly {
+		return fmt.Sprintf("%s;%s;%s;host", e.Domain, e.Path, e.Name)
+	}
 	return fmt.Sprintf("%s;%s;%s", e.Domain, e.Path, e.Name)
 }
 
@@ -218,11 +236,15 @@ func (j *Jar) cookies(u *url.URL, now time.Time) (cookies []*http.Cookie) {
 		return s[i].seqNum < s[j].seqNum
 	})
 	for _, e := range selected {
+		domain := e.Domain
+		if j.hostOnlyApart && !e.HostOnly {
+			domain = "." + domain
+		}
 		cookies = append(cookies, &http.Cookie{
 			Name:     e.Name,
 			Value:    e.Value,
 			Path:     e.Path,
-			Domain:   e.Domain,
+			Domain:   domain,
 			Expires:  e.Expires,
 			Secure:   e.Secure,
 			HttpOnly: e.HttpOnly,
@@ -265,7 +287,7 @@ func (j *Jar) setCookies(u *url.URL, cookies []*http.Cookie, now time.Time) {
 		if err != nil {
 			continue
 		}
-		id := e.id()
+		id := e.id(j.hostOnlyApart)
 		if remove {
 			if submap != nil {
 				if _, ok := submap[id]; ok {
