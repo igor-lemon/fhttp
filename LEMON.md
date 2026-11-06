@@ -779,3 +779,16 @@ second; it is x/net's again, one reset as it is given up.
 `http2/onereset_test.go` (two Closes with and without WindowUpdateDelay, a
 cancel, DrainBody's timer); 4 mutants killed.
 
+## No request sent again with a body its attempt closed (review 2026-11-05)
+
+`rewound` sent a request again with its own body, no GetBody, whenever the
+body's write had not begun: but a failed attempt has closed it by then (the
+RoundTripper contract when its HEADERS did not go, abortRequestBodyWrite when
+the read loop failed it), so it went again empty and waited for an answer.
+Only `errClientConnUnusable`, a connection that took no stream and touched
+nothing, sends it again so now, as x/net's shouldRetryRequest; any other
+failure says "cannot retry ... after Request.Body was closed; define
+Request.GetBody". `TestABodyAnAttemptClosedIsNotSentAgainEmpty` (resend_test:
+a POST whose HEADERS a reused connection took no more; the old code timed
+out), `TestRewound`'s rows.
+

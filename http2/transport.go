@@ -858,13 +858,16 @@ func rewound(req *http.Request, err error, afterBodyWrite bool) (*http.Request, 
 		return &newReq, nil
 	}
 
-	// The Request.Body can't reset back to the beginning, but we
-	// don't seem to have started to read from it yet, so reuse
-	// the request directly. The "afterBodyWrite" means the
-	// bodyWrite process has started, which becomes true before
-	// the first Read.
-	if !afterBodyWrite {
+	// The Request.Body can't reset back to the beginning. A connection that
+	// could take no stream left it untouched, and it goes again as it is;
+	// any other failure closed it (the RoundTripper contract, or
+	// abortRequestBodyWrite) or wrote some of it, and sent again it would go
+	// empty or cut short, as x/net says.
+	if err == errClientConnUnusable {
 		return req, nil
+	}
+	if !afterBodyWrite {
+		return nil, fmt.Errorf("http2: Transport: cannot retry err [%v] after Request.Body was closed; define Request.GetBody to avoid this error", err)
 	}
 
 	return nil, fmt.Errorf("http2: Transport: cannot retry err [%v] after Request.Body was written; define Request.GetBody to avoid this error", err)
