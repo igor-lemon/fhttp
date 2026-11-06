@@ -779,6 +779,28 @@ second; it is x/net's again, one reset as it is given up.
 `http2/onereset_test.go` (two Closes with and without WindowUpdateDelay, a
 cancel, DrainBody's timer); 4 mutants killed.
 
+## No reset of a stream ended on both sides (2026-11-06)
+
+The one-reset fix above made `cancelStream` reset as a request is given up,
+and a request's context ends as its caller is done with it: a stream ended
+on both sides, its request written whole and its answer's END_STREAM read,
+was reset where it was still on its connection. That is so where the
+connection was closing as its END_STREAM came (`streamByID` forgets no
+stream of a closed connection), and as its body's Close breaks its pipe
+before forgetting it. The reset is one Chrome never sends; and written as
+the connection closed, a write in flight then kept utls's `Close` from
+sending the TLS close_notify (io.Writer and io.Closer used at once):
+tls-forge's `TestA12NormalTLSShutdownUsesOnlyTheSelectedJSON` lost it 3 runs
+of 60 at the pin of 2b67fc1, none of 60 before 38cf27b, none of 300 now.
+`cancelStream` resets none such now, as x/net's cleanupWriteRequest ("closed
+cleanly on both sides, there is no error"): `clientStream.sentEndStream` is
+set where the request's END_STREAM is written (HEADERS, the body's last DATA,
+its trailers), `peerEnded` where the read loop reads the answer's (DATA or
+HEADERS), both atomic, as the read loop's `gotEndStream` is its own.
+`http2/onereset_test.go`: `TestAStreamEndedOnBothSidesIsNotResetAsItsRequestIsGivenUp`
+(the rule, on cancelStream), `TestAStreamSaysWhenEachSideEnded` (a GET, a
+POST, one of trailers on both sides); 7 mutants killed.
+
 ## No request sent again with a body its attempt closed (review 2026-11-05)
 
 `rewound` sent a request again with its own body, no GetBody, whenever the
