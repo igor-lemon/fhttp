@@ -3322,7 +3322,11 @@ func (rl *clientConnReadLoop) processResetStream(f *RSTStreamFrame) error {
 		// isn't a race.
 	default:
 		err := streamError(cs.ID, f.ErrCode)
+		// Under cc.mu: a body closed on the caller's goroutine reads it there
+		// to know whether to reset the stream itself.
+		cs.cc.mu.Lock()
 		cs.resetErr = err
+		cs.cc.mu.Unlock()
 		close(cs.peerReset)
 		cs.bufPipe.CloseWithError(err)
 		cs.cc.cond.Broadcast() // wake up checkResetOrDone via clientStream.awaitFlowControl
