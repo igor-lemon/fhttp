@@ -827,3 +827,16 @@ always. Tests: `internal/chunked_barelf_test.go`, `response_barelf_test.go`;
 14 mutants, 13 killed, one equivalent (an end cut short is the next line's
 ErrUnexpectedEOF).
 
+
+## A host's cookie kept apart from its domain's (2026-11-06)
+
+`cookiejar.Options.HostOnlyApart` keeps a cookie its host's alone apart from
+one of the same name, domain and path that is the domain's (a Domain naming
+the host), as RFC 6265bis (5.7, step 22) has it and Chrome 156.0.8078.80
+keeps them (measured at example.test and www.example.test, two launches
+each): `entry.id` adds the host-only flag, so each is replaced and removed by
+its own kind, and both are sent; the jar answers a domain's with a Domain
+that begins with a dot, as a cookie file writes it, so that a caller can tell
+them apart. Without it, RFC 6265's one cookie, as Go's jar. tls-forge builds
+its jar so where a profile says `cookie.identity` name-domain-host-only-path
+(utls registry). Test: `cookiejar/hostonly_test.go`; 6 mutants, all killed.
