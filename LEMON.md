@@ -754,3 +754,14 @@ sensitive") say it. `TestTransportFailsOnInvalidHeaders` and
 `TestAHeaderValueThatCannotBeSentIsNotQuoted` the error and the log, over
 both protocols. The bundle's check is not reached through `Transport`, which
 refuses the value first.
+
+## A server's reset and a body closed at once (review 2026-11-05)
+
+`processResetStream` wrote `cs.resetErr` on the read loop without `cc.mu`,
+which a response body's Close reads under it to know whether to reset the
+stream itself (`transportResponseBody.Close`): a data race whenever a server
+reset a stream as its caller let go of it. It is written under `cc.mu` now.
+`TestAServersResetAndABodyClosedAtOnceDoNotRace` (http2) closes the body at
+another point of the reset's way each time, 400 times: under `-race` it
+failed with the old code (transport.go 2944 against 3305) and passes. The
+bundled copy (h2_bundle.go) reads no resetErr in Close.
