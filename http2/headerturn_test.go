@@ -629,9 +629,9 @@ func TestAPingFailedEndsARequestWhoseOwnHeadersAreHeld(t *testing.T) {
 }
 
 // TestAPingFailedGivesUpAConnectionWhoseReaderWaitsForAHeldWrite: the
-// connection's reader, which holds cc.mu while it waits to acknowledge the
-// peer's SETTINGS behind a write the peer does not take, holds up neither the
-// giving up of the connection for its unanswered PING nor the requests on it.
+// connection's reader, which waits to acknowledge the peer's SETTINGS behind a
+// write the peer does not take, holds up neither the giving up of the
+// connection for its unanswered PING nor the requests on it.
 func TestAPingFailedGivesUpAConnectionWhoseReaderWaitsForAHeldWrite(t *testing.T) {
 	clients, servers := pairs(t, 1)
 	p := newPeer(t, servers[0])
