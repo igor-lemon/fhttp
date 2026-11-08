@@ -840,3 +840,30 @@ that begins with a dot, as a cookie file writes it, so that a caller can tell
 them apart. Without it, RFC 6265's one cookie, as Go's jar. tls-forge builds
 its jar so where a profile says `cookie.identity` name-domain-host-only-path
 (utls registry). Test: `cookiejar/hostonly_test.go`; 6 mutants, all killed.
+
+## Nothing waits for a held write with cc.mu (2026-11-08)
+
+The fork gate of tls-forge's main (`TestAWriteThePeerDoesNotTakeHoldsUpNoOtherHostsRequest`,
+19 of 200 runs in one process here) found what the 2026-11-05 change left:
+the peer's SETTINGS that came while a write it did not take was held were
+taken under `cc.mu`, and the reader went on holding it while the
+acknowledgement waited for `cc.wmu`. The pool, which asks each connection
+under its own lock whether it takes a request (`idleState`), then waited for
+the held write, and with it every request of the transport, to any host. A
+body read whose WINDOW_UPDATE is due (under WindowUpdateDelay, the first read
+past the delay), a body let go of (its RST_STREAM and WINDOW_UPDATE, both
+`Close` paths), what the reader frees at once of a frame (padding, a reset
+stream's DATA, a stream no longer there) and `Shutdown`'s GOAWAY did the same.
+No preface PING bounds a body read: the reader is not idle.
+
+Each is now decided under `cc.mu` and written without it, as x/net's:
+`processSettings` takes the connection's header turn instead, so that the
+settings are taken after the block encoded before them and acknowledged
+before any block encoded for them; the reset of a body let go of is still one
+a stream (`cs.didReset`, set under `cc.mu`), and `closeBody` forgets the
+stream once what it says is written, as before. What waits for the held
+write is the thing that writes, alone.
+
+Tests: `http2/heldwrite_test.go`, one case each (SETTINGS, GOAWAY, a body
+read, a body let go of with and without the delay, padding with and without
+it, a stream no longer there), each failing with the code before and passing.

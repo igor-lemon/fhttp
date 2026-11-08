@@ -1331,26 +1331,26 @@ func (cc *ClientConn) Shutdown(ctx context.Context) error {
 }
 
 func (cc *ClientConn) sendGoAway() error {
+	// Decided under cc.mu, written without it, as x/net's: a write the peer
+	// does not take holds up only what waits for the connection's writes.
 	cc.mu.Lock()
-	defer cc.mu.Unlock()
-	cc.wmu.Lock()
-	defer cc.wmu.Unlock()
-	if cc.closing {
+	closing := cc.closing
+	// Prevent new requests
+	cc.closing = true
+	maxStreamID := cc.nextStreamID
+	cc.mu.Unlock()
+	if closing {
 		// GOAWAY sent already
 		return nil
 	}
+	cc.wmu.Lock()
+	defer cc.wmu.Unlock()
 	// Send a graceful shutdown frame to server
-	maxStreamID := cc.nextStreamID
 	if err := cc.fr.WriteGoAway(maxStreamID, ErrCodeNo, nil); err != nil {
 		return err
 	}
-	if err := cc.bw.Flush(); err != nil {
-		return err
-	}
-	// Prevent new requests
-	cc.closing = true
 
-	return nil
+	return cc.bw.Flush()
 }
 
 // closes the client connection immediately. In-flight requests are interrupted.
@@ -2890,7 +2890,6 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 	}
 
 	cc.mu.Lock()
-	defer cc.mu.Unlock()
 
 	var connAdd, streamAdd int32
 
@@ -2937,6 +2936,10 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 		}
 	}
 
+	cc.mu.Unlock()
+
+	// Told without cc.mu, as x/net's: a write the peer does not take holds
+	// up this read alone, not what asks about the connection (the pool).
 	if connAdd != 0 || streamAdd != 0 {
 		cc.wmu.Lock()
 		defer cc.wmu.Unlock()
@@ -2969,20 +2972,27 @@ func (b transportResponseBody) Close() error {
 	unread := cs.bufPipe.Len()
 
 	if unread > 0 || !serverSentStreamEnd {
+		// Decided under cc.mu, which keeps the reset one a stream, and
+		// written without it.
 		cc.mu.Lock()
-		cc.wmu.Lock()
-		if !serverSentStreamEnd && cs.resetErr == nil && !cs.didReset && !cc.closed {
-			cc.fr.WriteRSTStream(cs.ID, ErrCodeCancel)
+		reset := !serverSentStreamEnd && cs.resetErr == nil && !cs.didReset && !cc.closed
+		if reset {
 			cs.didReset = true
 		}
 		// Return connection-level flow control.
 		if unread > 0 {
 			cc.inflow.add(int32(unread))
+		}
+		cc.mu.Unlock()
+		cc.wmu.Lock()
+		if reset {
+			cc.fr.WriteRSTStream(cs.ID, ErrCodeCancel)
+		}
+		if unread > 0 {
 			cc.fr.WriteWindowUpdate(0, uint32(unread))
 		}
 		cc.bw.Flush()
 		cc.wmu.Unlock()
-		cc.mu.Unlock()
 	}
 
 	cs.bufPipe.BreakWithError(errClosedResponseBody)
@@ -3026,13 +3036,14 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) (err error) {
 		if f.Length > 0 && cc.t.WindowUpdateDelay > 0 {
 			// Freed at once, and told of by Chrome's rule (windowupdate.go).
 			cc.mu.Lock()
-			if connAdd := cc.freedOfConn(int32(f.Length), timeNow()); connAdd != 0 {
+			connAdd := cc.freedOfConn(int32(f.Length), timeNow())
+			cc.mu.Unlock()
+			if connAdd != 0 {
 				cc.wmu.Lock()
 				cc.fr.WriteWindowUpdate(0, uint32(connAdd))
 				cc.bw.Flush()
 				cc.wmu.Unlock()
 			}
-			cc.mu.Unlock()
 		} else if f.Length > 0 {
 			cc.mu.Lock()
 			cc.inflow.add(int32(f.Length))
@@ -3093,27 +3104,25 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) (err error) {
 		if didReset {
 			refund += len(data)
 		}
+		// What is freed at once is worked out under cc.mu and told of after
+		// it is let go of (below).
+		var connAdd, streamAdd int32
 		if refund > 0 && cc.t.WindowUpdateDelay > 0 {
 			// Freed at once, and told of by Chrome's rule (windowupdate.go):
 			// the stream's padding while it is open, as Chrome's
 			// SpdyStream::OnPaddingConsumed.
 			now := timeNow()
-			connAdd := cc.freedOfConn(int32(refund), now)
-			var streamAdd int32
+			connAdd = cc.freedOfConn(int32(refund), now)
 			if !didReset {
 				streamAdd = cc.freedOfStream(cs, int32(refund), now)
 			}
-			cc.writeWindowUpdates(cs, connAdd, streamAdd)
 		} else if refund > 0 {
 			cc.inflow.add(int32(refund))
-			cc.wmu.Lock()
-			cc.fr.WriteWindowUpdate(0, uint32(refund))
+			connAdd = int32(refund)
 			if !didReset {
 				cs.inflow.add(int32(refund))
-				cc.fr.WriteWindowUpdate(cs.ID, uint32(refund))
+				streamAdd = int32(refund)
 			}
-			cc.bw.Flush()
-			cc.wmu.Unlock()
 		}
 		var err error
 		if cc.t.WindowUpdateDelay > 0 && len(data) > 0 && !didReset {
@@ -3124,6 +3133,7 @@ func (rl *clientConnReadLoop) processData(f *DataFrame) (err error) {
 			data = nil
 		}
 		cc.mu.Unlock()
+		cc.writeWindowUpdates(cs, connAdd, streamAdd)
 
 		if len(data) > 0 && !didReset {
 			_, err = cs.bufPipe.Write(data)
@@ -3196,10 +3206,9 @@ func (rl *clientConnReadLoop) processGoAway(f *GoAwayFrame) error {
 
 func (rl *clientConnReadLoop) processSettings(f *SettingsFrame) error {
 	cc := rl.cc
-	cc.mu.Lock()
-	defer cc.mu.Unlock()
-
 	if f.IsAck() {
+		cc.mu.Lock()
+		defer cc.mu.Unlock()
 		if cc.wantSettingsAck {
 			cc.wantSettingsAck = false
 
@@ -3209,13 +3218,20 @@ func (rl *clientConnReadLoop) processSettings(f *SettingsFrame) error {
 		return ConnectionError(ErrCodeProtocol)
 	}
 
-	// A header block encoded and not yet written goes before the encoder
-	// takes the peer's settings: it was encoded for the table the peer had
-	// before them, and its acknowledgement goes after it (headerturn.go).
+	// The peer's settings are taken, and acknowledged, in the connection's
+	// header turn (headerturn.go): after the block encoded before they came,
+	// which was encoded for the table the peer had then, and before any block
+	// encoded for them. cc.mu is not held while the acknowledgement waits for
+	// the connection's writes: a write the peer does not take would hold up,
+	// with it, the pool and every request it asks about the connection.
+	cc.headerTurns() <- struct{}{}
+	defer cc.giveHeaderTurn()
+	cc.mu.Lock()
 	for cc.writingHeaders {
 		cc.cond.Wait()
 	}
 	err := f.ForeachSetting(cc.applySetting)
+	cc.mu.Unlock()
 	if err != nil {
 		return err
 	}
