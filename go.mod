@@ -1,17 +1,17 @@
 module github.com/igor-lemon/fhttp
 
-go 1.24.1
+go 1.25
 
 require (
-	github.com/andybalholm/brotli v1.1.1
-	github.com/klauspost/compress v1.17.11
+	github.com/andybalholm/brotli v1.2.7
+	github.com/klauspost/compress v1.20.2
 	golang.org/x/net v0.38.0
 	golang.org/x/term v0.30.0
 )
 
 require (
 	github.com/cloudflare/circl v1.6.2 // indirect
-	github.com/igor-lemon/utls v1.7.8-barnius.0.20261027190147-856ef601ebd9
+	github.com/igor-lemon/utls v1.7.8-barnius.0.20261106190843-4b54ea578c9d
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
