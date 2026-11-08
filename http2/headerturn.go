@@ -10,15 +10,16 @@ import (
 
 // A connection's header blocks are encoded and written one at a time, in
 // turn: stream IDs go out in the order they are given, and a block goes out
-// before the next is encoded or the peer's SETTINGS change the encoder
-// (processSettings waits for writingHeaders). The turn is held while a block
-// waits for the connection's writes, cc.mu is not: a write the peer does not
-// take, under cc.wmu, then holds up neither what asks whether the connection
-// takes a request (the pool, under its own lock) nor the giving up of the
-// connection for an unanswered PING (closeForFailedPing), and a request
-// waiting for the turn waits no longer than it is wanted. Before, a request
-// held cc.mu from encoding its HEADERS to writing them, as x/net's did until
-// it made the same change.
+// before the next is encoded or the peer's SETTINGS change the encoder: the
+// reader takes the turn to take them and acknowledge them (processSettings).
+// The turn is held while a block, or an acknowledgement, waits for the
+// connection's writes, cc.mu is not: a write the peer does not take, under
+// cc.wmu, then holds up neither what asks whether the connection takes a
+// request (the pool, under its own lock) nor the giving up of the connection
+// for an unanswered PING (closeForFailedPing), and a request waiting for the
+// turn waits no longer than it is wanted. Before, a request held cc.mu from
+// encoding its HEADERS to writing them, as x/net's did until it made the same
+// change, and the reader held it until its acknowledgement was written.
 
 // headerTurns is the connection's turn, made at first use: a ClientConn made
 // apart from newClientConn has none yet.

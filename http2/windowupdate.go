@@ -61,39 +61,45 @@ func (cc *ClientConn) freedOfStream(cs *clientStream, n int32, now time.Time) in
 // closeBody lets go of cs's body under WindowUpdateDelay: what it held unread
 // is freed and told of by the rule, as Chrome takes a body it lets go of as
 // read, the stream is reset, the reset first, when the peer has not ended it,
-// and it is the connection's no more. All under cc.mu, which processData puts
-// a frame into a body under: a frame is in the body, unread, or comes for a
-// stream that is gone and is freed at once.
+// and it is the connection's no more. Worked out under cc.mu, which
+// processData puts a frame into a body under: a frame is in the body, unread,
+// or comes for a stream reset or gone and is freed at once. What it says goes
+// without cc.mu, and the stream goes once it is written, as before.
 func (cc *ClientConn) closeBody(cs *clientStream) {
 	cc.mu.Lock()
-	defer cc.mu.Unlock()
-	if cc.streams[cs.ID] == cs && !cc.closed {
-		defer cc.forgetStreamLocked(cs)
-	}
 	ended := cs.bufPipe.Err() == io.EOF
 	cs.bufPipe.BreakWithError(errClosedResponseBody)
 	var connAdd int32
 	if unread := cs.bufPipe.Len(); unread > 0 {
 		connAdd = cc.freedOfConn(int32(unread), timeNow())
 	}
-	if ended && connAdd == 0 {
-		return
-	}
-	cc.wmu.Lock()
-	defer cc.wmu.Unlock()
-	if !ended && cs.resetErr == nil && !cs.didReset && !cc.closed {
-		cc.fr.WriteRSTStream(cs.ID, ErrCodeCancel)
+	reset := !ended && cs.resetErr == nil && !cs.didReset && !cc.closed
+	if reset {
 		cs.didReset = true
 	}
-	if connAdd != 0 {
-		cc.fr.WriteWindowUpdate(0, uint32(connAdd))
+	cc.mu.Unlock()
+	if reset || connAdd != 0 {
+		cc.wmu.Lock()
+		if reset {
+			cc.fr.WriteRSTStream(cs.ID, ErrCodeCancel)
+		}
+		if connAdd != 0 {
+			cc.fr.WriteWindowUpdate(0, uint32(connAdd))
+		}
+		cc.bw.Flush()
+		cc.wmu.Unlock()
 	}
-	cc.bw.Flush()
+	cc.mu.Lock()
+	if cc.streams[cs.ID] == cs && !cc.closed {
+		cc.forgetStreamLocked(cs)
+	}
+	cc.mu.Unlock()
 }
 
 // writeWindowUpdates tells the peer of what was freed of the connection's
 // window and of cs's, the connection's first, as Chrome tells them; nothing
-// for a 0. Requires cc.mu.
+// for a 0. Called without cc.mu: a write the peer does not take holds up only
+// what waits for the connection's writes.
 func (cc *ClientConn) writeWindowUpdates(cs *clientStream, connAdd, streamAdd int32) {
 	if connAdd == 0 && streamAdd == 0 {
 		return
