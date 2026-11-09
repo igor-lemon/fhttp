@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -392,10 +393,15 @@ func TestCompressionBrotli(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if h := resp.Header.Get("content-encoding"); h == "" || h != "br" {
-		t.Fatalf("Got content-encoding header %v, expected br", h)
+	// The body is decoded even though the caller set Accept-Encoding
+	// (upstream #40), over HTTP/1.1 as over HTTP/2.
+	if !resp.Uncompressed {
+		t.Fatal("brotli body was not decoded")
 	}
-	body, err := io.ReadAll(http.DecompressBodyByType(resp.Body, "br"))
+	if h := resp.Header.Get("content-encoding"); h != "" {
+		t.Fatalf("Got content-encoding header %v, expected none", h)
+	}
+	body, err := io.ReadAll(resp.Body)
 	if err != nil || string(body) != "owned Brotli body" {
 		t.Fatalf("decoded Brotli body=%q error=%v", body, err)
 	}
@@ -434,9 +440,9 @@ func deflateServer(t *testing.T, zlibWrapped bool) *httptest.Server {
 	}))
 }
 
-// A caller that sets accept-encoding itself owns the decoding: the transport
-// must not decompress the body or strip Content-Encoding. Verify that, and
-// that the library decodes both deflate flavours.
+// The transport decodes by the response's Content-Encoding even when the caller
+// set accept-encoding itself, and strips the header. Verify that for both deflate
+// flavours.
 func testCompressionDeflate(t *testing.T, zlibWrapped bool) {
 	t.Helper()
 
@@ -457,11 +463,11 @@ func testCompressionDeflate(t *testing.T, zlibWrapped bool) {
 	}
 	defer resp.Body.Close()
 
-	if h := resp.Header.Get("content-encoding"); h != "deflate" {
-		t.Fatalf("Expected content encoding deflate, got %q", h)
+	if h := resp.Header.Get("content-encoding"); h != "" {
+		t.Fatalf("Expected no content encoding, got %q", h)
 	}
 
-	got, err := io.ReadAll(http.DecompressBodyByType(resp.Body, "deflate"))
+	got, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,9 +481,102 @@ func TestCompressionZlibDeflate(t *testing.T) {
 	testCompressionDeflate(t, true)
 }
 
-// Test compression deflate
+// Test compression deflate, a raw stream rather than a zlib-wrapped one
 func TestCompressionDeflate(t *testing.T) {
 	testCompressionDeflate(t, false)
+}
+
+// A deflate body must not be read while the response is being built.
+//
+// Telling a zlib-wrapped stream from a raw one needs the first two bytes, and
+// sniffing them during the round trip meant the request did not come back until
+// the body did. On HTTP/2 it did not come back at all: the read waited for
+// bytes the transport was not yet delivering, and the caller saw a timeout
+// awaiting headers.
+//
+// The server here sends its headers and holds the body until the test lets it
+// go, so a round trip that reads the body cannot return.
+func TestDeflateResponseReturnsBeforeItsBody(t *testing.T) {
+	var buf bytes.Buffer
+	fw, err := flate.NewWriter(&buf, flate.DefaultCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(fw, deflateBody); err != nil {
+		t.Fatal(err)
+	}
+	if err := fw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload := buf.Bytes()
+
+	release := make(chan struct{})
+	var once sync.Once
+	releaseBody := func() { once.Do(func() { close(release) }) }
+
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "deflate")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+		w.Write(payload)
+	}))
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	defer ts.Close()
+	defer releaseBody()
+
+	req, err := http.NewRequest("GET", ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header = http.Header{"accept-encoding": {"deflate"}}
+
+	done := make(chan *http.Response, 1)
+	errs := make(chan error, 1)
+	go func() {
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			errs <- err
+
+			return
+		}
+		done <- resp
+	}()
+
+	var resp *http.Response
+	select {
+	case resp = <-done:
+	case err := <-errs:
+		t.Fatalf("Do: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the response did not come back while the body was still being held")
+	}
+	defer resp.Body.Close()
+	// Only HTTP/2 decodes a body whose encoding the caller asked for itself.
+	if resp.ProtoMajor != 2 {
+		t.Skip("HTTP/2 is not in use")
+	}
+
+	// The control: the body really was still held, so returning proves the
+	// round trip did not wait for it.
+	select {
+	case <-release:
+		t.Fatal("the body was released before the response came back")
+	default:
+	}
+
+	releaseBody()
+
+	// Read it back as well, so a round trip that returns early but hands back
+	// an unusable body does not pass.
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != deflateBody {
+		t.Errorf("body = %q; want %q", got, deflateBody)
+	}
 }
 
 // Test with cookies

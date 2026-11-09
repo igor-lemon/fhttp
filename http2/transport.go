@@ -261,6 +261,14 @@ func (t *Transport) GetT1() *http.Transport {
 	return t.t1
 }
 
+// SetT1 sets the HTTP/1 Transport whose settings, such as
+// ResponseHeaderTimeout and DisableKeepAlives, this transport uses.
+// Unlike ConfigureTransports, it does not modify t1.
+// It must be called before the transport is first used.
+func (t *Transport) SetT1(t1 *http.Transport) {
+	t.t1 = t1
+}
+
 func (t *Transport) maxHeaderListSize() uint32 {
 	maxHeaderListSize, ok := t.Settings[SettingMaxHeaderListSize]
 
@@ -428,6 +436,7 @@ type ClientConn struct {
 
 	mu                    sync.Mutex // guards following
 	nextStreamID          uint32
+	firstStreamID         uint32 // nextStreamID before any request: 1 unless InitialStreamID, AllowHTTP or Priorities moved it
 	peerMaxHeaderListSize uint64
 	pendingRequests       int                       // requests blocked and waiting to be sent because len(streams) == maxConcurrentStreams
 	pings                 map[[8]byte]chan struct{} // in flight ping data to notification channel
@@ -1120,6 +1129,11 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 		cc.nextStreamID = priority.StreamID + 2
 	}
 
+	// The first stream is not always 1, so remember where this connection
+	// starts. idleStateLocked uses it to tell an unused connection from a
+	// used one.
+	cc.firstStreamID = cc.nextStreamID
+
 	// Use the dynamic connection flow value we calculated earlier
 	cc.inflow.add(int32(cc.connFlow) + int32(initialWindowSize))
 
@@ -1222,7 +1236,7 @@ func (cc *ClientConn) idleState() clientConnIdleState {
 }
 
 func (cc *ClientConn) idleStateLocked() (st clientConnIdleState) {
-	if cc.singleUse && cc.nextStreamID > 1 {
+	if cc.singleUse && cc.nextStreamID > cc.firstStreamID {
 		return
 	}
 	var maxConcurrentOkay bool
@@ -1239,7 +1253,7 @@ func (cc *ClientConn) idleStateLocked() (st clientConnIdleState) {
 	st.canTakeNewRequest = cc.goAway == nil && !cc.closed && !cc.closing && maxConcurrentOkay &&
 		int64(cc.nextStreamID)+2*int64(cc.pendingRequests) <= math.MaxInt32 &&
 		!cc.tooIdleLocked()
-	st.freshConn = cc.nextStreamID == 1 && st.canTakeNewRequest
+	st.freshConn = cc.nextStreamID == cc.firstStreamID && st.canTakeNewRequest
 
 	return
 }
@@ -2198,7 +2212,7 @@ func (cc *ClientConn) encodeHeaders(req *http.Request, addGzipHeader bool, trail
 
 		// Does not include accept-encoding header if its defined in req.Header
 		if _, ok := hdrs["accept-encoding"]; !ok && addGzipHeader {
-			hdrs["accept-encoding"] = []string{"gzip, deflate, br"}
+			hdrs["accept-encoding"] = []string{"gzip, deflate, br, zstd"}
 		}
 
 		// Formats and writes headers with f function
@@ -2962,13 +2976,19 @@ func (b transportResponseBody) Close() error {
 	cs := b.cs
 	cc := cs.cc
 
+	// A body already closed by the caller is closed: another Close sends
+	// nothing more (upstream #26).
+	pipeErr := cs.bufPipe.Err()
+	if pipeErr == errClosedResponseBody {
+		return nil
+	}
 	if cc.t.WindowUpdateDelay > 0 {
 		cc.closeBody(cs)
 
 		return nil
 	}
 
-	serverSentStreamEnd := cs.bufPipe.Err() == io.EOF
+	serverSentStreamEnd := pipeErr == io.EOF
 	unread := cs.bufPipe.Len()
 
 	if unread > 0 || !serverSentStreamEnd {

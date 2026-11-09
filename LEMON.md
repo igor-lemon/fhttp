@@ -1,7 +1,8 @@
 # fhttp for tls-forge
 
 A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
-(`a8b14170ef54dc2355c68ec20951a86750fb7732`), on the branch `tls-forge`, for
+(`a8b14170ef54dc2355c68ec20951a86750fb7732`), with v0.7.3 merged (below), on
+the branch `tls-forge`, for
 [tls-forge](https://github.com/Sec-CH-Lemon/tls-forge).
 
 - The module is `github.com/igor-lemon/fhttp`: every import of
@@ -27,6 +28,39 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   minutes; the patches change none of that. Run the package with
   `-skip '^TestOmitHTTP2$'` and nothing else at once: its tests use up the
   machine's ephemeral ports, and a run straight after another fails more.
+
+## Upstream v0.7.3 merged (2026-11-09)
+
+bogdanfinn's v0.6.9..v0.7.3 (17 commits, `a8ae93e`) is merged into this
+branch; `go 1.26.0` is what x/net 0.59 asks. Several of upstream's fixes are
+this fork's own, made apart, and the fork's are kept: a copy of the header
+map written (#32, A11 request wire ownership), each transfer field traced once
+(#32), io.NopCloser of a WriterTo known (#32), deflate told raw from zlib on
+the first read by RFC 1950's rule (#27, A11 response decoding), Go 1.26.10's
+deterministic shared-connection cancel test (#32). Otherwise:
+
+- **Taken**: an HTTP/2 response body closed twice sends nothing more (#26),
+  before the window-update delay's path too; HTTP/1.1 decoded by the answer's
+  Content-Encoding whenever DisableCompression is false (#40; the explicit-gzip
+  rule it replaces only kept net/http's old behaviour); zstd in the default
+  Accept-Encoding and the zstd decoder's window and concurrency bounded (#29,
+  da774ac); a caller's Transfer-Encoding or Trailer replaced, under the name
+  it was given, rather than written beside the generated one (#32, #36);
+  `looksLikeZlib` (#27) holding the fork's own check; `Transport.SetT1` (#34);
+  a single-use connection whose first stream is not 1 (#33); the HTTP/2
+  server's changes (#35, #37, #38, #39); `relevantCaller` by the package's
+  path (#32).
+- **Not taken**: Content-Length taken from the request alone (#32, #36), in
+  the HTTP/2 bundle too: a caller's raw Content-Length stays this fork's
+  contract (A11, `TestTransportContentLengthHeaders`). An empty or repeated
+  User-Agent cut over HTTP/1.1 (#28, #32): the fork's raw User-Agent contract
+  (A11) stands, and upstream's test holds it. Upstream's
+  `TestServer_MaxQueuedControlFrames` of four million PINGs: the fork's over
+  net.Pipe stays. Upstream's brotli test of a remote page: the fork's local
+  server stays, the body now decoded by the transport.
+
+The fork's `http2` tests expect zstd in the default Accept-Encoding. Root alone
+(`GOWORK=off go test .`) and the other packages pass.
 
 ## Patches
 

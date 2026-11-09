@@ -2626,6 +2626,10 @@ func testRejectTLS(t *testing.T, max uint16) {
 		// config whose Min is above its Max cannot handshake at all.
 		c.MinVersion = max
 		c.MaxVersion = max
+	}, func(ts *httptest.Server) {
+		// utls no longer accepts TLS 1.0 and 1.1 on the server side unless
+		// MinVersion is lowered explicitly.
+		ts.Config.TLSConfig = &tls.Config{MinVersion: max}
 	})
 	defer st.Close()
 	gf := st.wantGoAway()

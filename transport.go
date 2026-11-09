@@ -2328,7 +2328,7 @@ func (pc *persistConn) readLoop() {
 
 		resp.Body = body
 
-		if rc.addedGzip {
+		if !pc.t.DisableCompression {
 			resp.Body = DecompressBody(resp)
 		}
 
@@ -2654,11 +2654,6 @@ type requestAndChan struct {
 	cancelKey cancelKey
 	ch        chan responseAndError // unbuffered; always send in select on callerGone
 
-	// whether the Transport (as opposed to the user client code)
-	// added the Accept-Encoding gzip header. If the Transport
-	// set it, only then do we transparently decode the gzip.
-	addedGzip bool
-
 	// Optional blocking chan for Expect: 100-continue (for send).
 	// If the request has an "Expect: 100-continue" header and
 	// the server responds 100 Continue, readLoop send a value
@@ -2736,17 +2731,16 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	}
 
 	// Ask for a compressed version if the caller didn't set their
-	// own value for Accept-Encoding. We only attempt to
-	// uncompress the gzip stream if we were the layer that
-	// requested it.
+	// own value for Accept-Encoding. The response body is
+	// transparently decoded based on the response's actual
+	// Content-Encoding regardless of which layer asked for it.
 
-	requestedGzip := false
 	if !pc.t.DisableCompression &&
 		req.Header.Get("Accept-Encoding") == "" &&
 		req.Header.get("accept-encoding") == "" &&
 		req.Header.Get("Range") == "" &&
 		req.Method != "HEAD" {
-		// Request gzip, deflate, br if Accept-Encoding is
+		// Request gzip, deflate, br, zstd if Accept-Encoding is
 		// not specified
 		//
 		// Note that we don't request this for HEAD requests,
@@ -2757,14 +2751,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 		// We don't request gzip if the request is for a range, since
 		// auto-decoding a portion of a gzipped document will just fail
 		// anyway. See https://golang.org/issue/8923
-		requestedGzip = true
-		req.extraHeaders().Set("Accept-Encoding", "gzip, deflate, br")
-	}
-
-	// Preserve fhttp's explicit-gzip automatic decoding contract. Other
-	// caller-selected codings remain raw for DecompressBodyByType.
-	if !pc.t.DisableCompression && (strings.Contains(req.Header.Get("Accept-Encoding"), "gzip") || strings.Contains(req.Request.Header.get("accept-encoding"), "gzip")) {
-		requestedGzip = true
+		req.extraHeaders().Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
 
 	var continueCh chan struct{}
@@ -2801,7 +2788,6 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 		req:        req.Request,
 		cancelKey:  req.cancelKey,
 		ch:         resc,
-		addedGzip:  requestedGzip,
 		continueCh: continueCh,
 		callerGone: gone,
 	}
@@ -3087,6 +3073,8 @@ func (cl *connLRU) len() int {
 	return len(cl.m)
 }
 
+// DecompressBody returns the body of res decoded by its Content-Encoding, marking res as uncompressed
+// and removing its Content-Encoding and Content-Length, or the body itself if the encoding is not one fhttp decodes.
 func DecompressBody(res *Response) io.ReadCloser {
 	ce := strings.ToLower(strings.TrimSpace(res.Header.Get("Content-Encoding")))
 	switch ce {
@@ -3277,7 +3265,7 @@ func (dr *deflateReader) Read(p []byte) (n int, err error) {
 	if dr.r == nil {
 		br := bufio.NewReader(dr.body)
 		header, _ := br.Peek(2)
-		if len(header) == 2 && header[0]&15 == 8 && header[0]>>4 <= 7 && (int(header[0])*256+int(header[1]))%31 == 0 {
+		if len(header) == 2 && looksLikeZlib([2]byte{header[0], header[1]}) {
 			dr.r, dr.err = zlib.NewReader(br)
 		} else {
 			dr.r = flate.NewReader(br)
@@ -3296,6 +3284,10 @@ func (dr *deflateReader) Close() error {
 		}
 	})
 }
+
+// zstdMaxWindowSize is the largest window a zstd content coding may use, per RFC 9659 section 3.
+// Without the limit a server could make the decoder allocate up to its default of 512MB.
+const zstdMaxWindowSize = 8 << 20
 
 // zstdReader wraps a response body so it can lazily
 // call zstd.NewReader on the first call to Read
@@ -3316,7 +3308,8 @@ func (zs *zstdReader) Read(p []byte) (n int, err error) {
 		return 0, zs.zerr
 	}
 	if zs.zr == nil {
-		zs.zr, err = zstd.NewReader(zs.body)
+		// A single decoder goroutine suffices for one response body and keeps the per-response cost low.
+		zs.zr, err = zstd.NewReader(zs.body, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(zstdMaxWindowSize))
 		if err != nil {
 			zs.zerr = err
 			return 0, err
@@ -3331,6 +3324,24 @@ func (zs *zstdReader) Close() error {
 			zs.zr.Close()
 		}
 	})
+}
+
+// RFC 1950 section 2.2. The low nibble of the first byte is the compression
+// method, its high nibble the base-2 log of the window size less eight, and the
+// two bytes read as a big-endian number are a multiple of 31.
+const (
+	zlibMethodDeflate = 8
+	zlibMaxWindow     = 7
+	zlibHeaderModulus = 31
+)
+
+// looksLikeZlib reports whether these two bytes open a zlib stream (upstream
+// #27, as this fork's deflateReader told them already).
+func looksLikeZlib(header [2]byte) bool {
+	if header[0]&0x0f != zlibMethodDeflate || header[0]>>4 > zlibMaxWindow {
+		return false
+	}
+	return (uint16(header[0])<<8|uint16(header[1]))%zlibHeaderModulus == 0
 }
 
 func identifyDeflate(body io.ReadCloser) io.ReadCloser {

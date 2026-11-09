@@ -285,7 +285,9 @@ func (t *transferWriter) addHeaders(hdrs *Header) error {
 	if t.shouldSendContentLength() && !hasHeaderName(*hdrs, "Content-Length") {
 		hdrs.Add("Content-Length", strconv.FormatInt(t.ContentLength, 10))
 	} else if chunked(t.TransferEncoding) {
-		hdrs.Add("Transfer-Encoding", "chunked")
+		// The caller's Transfer-Encoding gives way under the name it was
+		// given (upstream #32, #36), rather than going out beside it.
+		setTransferHeader(*hdrs, "Transfer-Encoding", "chunked")
 	}
 
 	// Write Trailer header
@@ -303,11 +305,46 @@ func (t *transferWriter) addHeaders(hdrs *Header) error {
 			sort.Strings(keys)
 			// TODO: could do better allocation-wise here, but trailers are rare,
 			// so being lazy for now.
-			hdrs.Add("Trailer", strings.Join(keys, ","))
+			setTransferHeader(*hdrs, "Trailer", strings.Join(keys, ","))
 		}
 	}
 
 	return nil
+}
+
+// setTransferHeader sets key to value in h, replacing the caller's value under
+// any case of key but keeping the name the caller wrote.
+func setTransferHeader(h Header, key, value string) {
+	name := headerNameFold(h, key)
+	deleteHeaderFold(h, key)
+	h[name] = []string{value}
+}
+
+// headerNameFold returns the name under which h has key, if h has it under
+// exactly one case, and otherwise the canonical form of key.
+func headerNameFold(h Header, key string) string {
+	name := ""
+	for k := range h {
+		if strings.EqualFold(k, key) {
+			if name != "" {
+				return CanonicalHeaderKey(key)
+			}
+			name = k
+		}
+	}
+	if name == "" {
+		return CanonicalHeaderKey(key)
+	}
+	return name
+}
+
+// deleteHeaderFold deletes key from h under any case.
+func deleteHeaderFold(h Header, key string) {
+	for k := range h {
+		if strings.EqualFold(k, key) {
+			delete(h, k)
+		}
+	}
 }
 
 func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) error {
