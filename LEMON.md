@@ -867,3 +867,23 @@ write is the thing that writes, alone.
 Tests: `http2/heldwrite_test.go`, one case each (SETTINGS, GOAWAY, a body
 read, a body let go of with and without the delay, padding with and without
 it, a stream no longer there), each failing with the code before and passing.
+
+## httptest's Close waits for a connection's ConnState hook (2026-11-09)
+
+The fork's copy of httptest forgot a closed connection (`forgetConn`, the
+WaitGroup's `Done`) before the server's own ConnState hook ran, so `Close`
+could return, and its test end, with the hook still to run: the http2
+package's `onSameConn` logs each state with `t.Logf`, and the race detector
+reported that log against the test's end (`TestTransportReusesConns` and
+its two kin under `-race`, 3 races of 3,000 runs here; the whole http2
+package under `-race` failed so once of two). Go's own httptest defers the
+`Done` past the hook ("Keep Close from returning until the user's ConnState
+hook (if any) finishes"); the fork's does the same now. Test-only package:
+nothing of tls-forge's shipped code imports it.
+
+Test: `httptest/connstate_test.go` holds a closed connection's hook until
+`Close` has had 100 ms to return (it must not) and then wants the hook ended
+when it does; it fails 20 runs of 20 with the old `Done`. Beside 14 busy
+loops, the three http2 tests under `-race` raced 3, 3 and 2 times in three
+rounds of 3,000 runs with the old one (the third panicked, "Log in goroutine
+after TestTransportReusesConn_ConnClose has completed"), none with the new.
