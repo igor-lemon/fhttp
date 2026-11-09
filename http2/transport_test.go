@@ -4464,7 +4464,8 @@ func TestTransportHandlesInvalidStatuslessResponse(t *testing.T) {
 
 func newTestPushHandlerReadResponse() *testPushHandlerReadResponse {
 	return &testPushHandlerReadResponse{
-		done: make(chan struct{}),
+		headed: make(chan struct{}),
+		done:   make(chan struct{}),
 	}
 }
 
@@ -4473,16 +4474,30 @@ type testPushHandlerReadResponse struct {
 	origReqURL    *url.URL
 	origReqHeader http.Header
 	push          *http.Response
+	pushBody      []byte
 	pushErr       error
-	done          chan struct{}
+	// headed is closed once the push's response head came, or did not
+	headed chan struct{}
+	done   chan struct{}
 }
 
+// HandlePush reads the pushed response whole before it returns: a pushed
+// stream not done when its handler returns is canceled
+// (handlePushEarlyReturnCancel), and what had not come of its body never
+// does. Read after HandlePush, as this handler's caller once read it, the
+// body waited for good whenever the read loop had not taken the rest of the
+// push before the handler returned, as under -race now and then.
 func (ph *testPushHandlerReadResponse) HandlePush(r *PushedRequest) {
+	defer close(ph.done)
 	ph.promise = r.Promise
 	ph.origReqURL = r.OriginalRequestURL
 	ph.origReqHeader = r.OriginalRequestHeader
 	ph.push, ph.pushErr = r.ReadResponse(r.Promise.Context())
-	close(ph.done)
+	close(ph.headed)
+	if ph.pushErr == nil {
+		ph.pushBody, ph.pushErr = io.ReadAll(ph.push.Body)
+		_ = ph.push.Body.Close()
+	}
 }
 
 func testTransportHandlePushPromise(t *testing.T,
@@ -4514,8 +4529,8 @@ func testTransportHandlePushPromise(t *testing.T,
 	if configTransport != nil {
 		configTransport(t, ct.tr)
 	}
+	pushHandler := newTestPushHandlerReadResponse()
 	ct.client = func() error {
-		pushHandler := newTestPushHandlerReadResponse()
 		ct.tr.PushHandler = pushHandler
 		req := httptest.NewRequest("GET", scheme+"://dummy.tld/", nil)
 		req.Header.Set("foo", "bar")
@@ -4555,8 +4570,8 @@ func testTransportHandlePushPromise(t *testing.T,
 		if pushHandler.push == nil {
 			return fmt.Errorf("push not received")
 		}
-		if err = checkResp(t, pushHandler.push, pushText); err != nil {
-			return err
+		if pushHandler.push.StatusCode != 200 || string(pushHandler.pushBody) != pushText {
+			return fmt.Errorf("push %d %q; want 200 %q", pushHandler.push.StatusCode, pushHandler.pushBody, pushText)
 		}
 		if pushHandler.push.Trailer.Get(pushTrailerKey) != pushTrailerValue {
 			return fmt.Errorf("promise value for key %q = %q, want %q", pushTrailerKey,
@@ -4591,6 +4606,13 @@ func testTransportHandlePushPromise(t *testing.T,
 			EndStream:     false,
 			BlockFragment: buf.Bytes(),
 		})
+		// the push's body after its handler has the head, as it comes
+		// when the read loop is slow to take it
+		select {
+		case <-pushHandler.headed:
+		case <-time.After(5 * time.Second):
+			return errors.New("the push's head never reached its handler")
+		}
 		ct.fr.WriteData(promiseID, false, []byte(pushText))
 		// add trailer
 		buf.Reset()
