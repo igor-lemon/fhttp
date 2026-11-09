@@ -1,7 +1,8 @@
 # fhttp for tls-forge
 
 A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
-(`a8b14170ef54dc2355c68ec20951a86750fb7732`), on the branch `tls-forge`, for
+(`a8b14170ef54dc2355c68ec20951a86750fb7732`), its patches laid over v0.7.3
+since 2026-11-10 (below), on the branch `tls-forge`, for
 [tls-forge](https://github.com/Sec-CH-Lemon/tls-forge).
 
 - The module is `github.com/igor-lemon/fhttp`: every import of
@@ -27,6 +28,84 @@ A fork of [bogdanfinn/fhttp](https://github.com/bogdanfinn/fhttp) v0.6.9
   minutes; the patches change none of that. Run the package with
   `-skip '^TestOmitHTTP2$'` and nothing else at once: its tests use up the
   machine's ephemeral ports, and a run straight after another fails more.
+
+## The branch: bogdanfinn's release, then the patches (2026-11-10)
+
+`git log --first-parent v0.7.3..tls-forge` lists the branch as it is laid out:
+bogdanfinn's v0.7.3 (`a8ae93ec6fd4`), then "Rename the module ...", the rename
+above, made by a script (the five forks' module paths in every Go file and
+go.mod, imports sorted), then this fork's patches, one commit a change, oldest
+first, as this file tells them. A merge on top, `-s ours`, joins the branch's
+earlier head: the branch only ever moves forward, every commit a published pin
+names stays in it, and the merge's tree is the last patch's.
+
+On 2026-11-10 the history to then (82 patches written over v0.6.9, and the
+merge of v0.7.3 of 2026-11-09) was laid over v0.7.3 so: each patch
+cherry-picked over the renamed release, a conflict resolved toward the merge's
+tree, and what the merge itself had resolved put into the patch it belongs to
+(the section on v0.7.3 says what was decided). The last patch's tree is the
+merge's, byte for byte, but for this section. Every commit of the series
+builds and passes go vet over the series of utls.
+
+To take another release of bogdanfinn's, with tls-forge's
+`scripts/fork_sync.py`, in a clone (this checkout is not touched):
+
+    python3 scripts/fork_sync.py start ../forks/fhttp vX.Y.Z --work /tmp/fhttp-sync
+    # a conflict stops it: resolve it, git add, then
+    python3 scripts/fork_sync.py continue --work /tmp/fhttp-sync
+    # what has to change for it to build, made in the clone, goes into the
+    # patch whose lines it touches (or the one --to "SUBJECT=PATH" names)
+    python3 scripts/fork_sync.py absorb --work /tmp/fhttp-sync
+    python3 scripts/fork_sync.py check --work /tmp/fhttp-sync --with ...
+    python3 scripts/fork_sync.py finish --work /tmp/fhttp-sync -m "Patches laid over vX.Y.Z"
+
+then `git merge --ff-only` of the clone's head on this branch. A conflict that
+only moves an import the rename changed settles itself; git rerere keeps the
+others; go.mod is merged module by module (the higher version) and go.sum by
+union. The forks go in tls-forge's order: utls, fhttp, websocket and
+quic-go-utls, tls-client; `check --with` builds a fork against the new series
+of the ones before it.
+
+## Upstream v0.7.3 merged (2026-11-09)
+
+bogdanfinn's v0.6.9..v0.7.3 (17 commits, `a8ae93e`) is merged into this
+branch; `go 1.26.0` is what x/net 0.59 asks. Several of upstream's fixes are
+this fork's own, made apart, and the fork's are kept: a copy of the header
+map written (#32, A11 request wire ownership), each transfer field traced once
+(#32), io.NopCloser of a WriterTo known (#32), deflate told raw from zlib on
+the first read by RFC 1950's rule (#27, A11 response decoding), Go 1.26.10's
+deterministic shared-connection cancel test (#32). Otherwise:
+
+- **Taken**: an HTTP/2 response body closed twice sends nothing more (#26),
+  before the window-update delay's path too; HTTP/1.1 decoded by the answer's
+  Content-Encoding whenever DisableCompression is false (#40; the explicit-gzip
+  rule it replaces only kept net/http's old behaviour); zstd in the default
+  Accept-Encoding and the zstd decoder's window and concurrency bounded (#29,
+  da774ac); a caller's Transfer-Encoding or Trailer replaced, under the name
+  it was given, rather than written beside the generated one (#32, #36);
+  `looksLikeZlib` (#27) holding the fork's own check; `Transport.SetT1` (#34);
+  a single-use connection whose first stream is not 1 (#33); the HTTP/2
+  server's changes (#35, #37, #38, #39); `relevantCaller` by the package's
+  path (#32).
+- **Taken back** on 2026-11-11, when tls-forge's `fork_sync.py review` held
+  each of upstream's lines this branch lacked to a reason: upstream's
+  `unwrapNopCloser`, its `nopCloserWriterToType` and `isKnownInMemoryReader`
+  (#32), and `slices.Clone` of `PseudoHeaderOrder` in `Transport.Clone`
+  (#32), in place of this fork's own copies of the same. The fork keeps what
+  they lack: `heldInMemory`, for a head and its body written at once, and
+  the io.NopCloser inside a readTrackingBody unwrapped too. The zero-copy
+  case of the body reader test says it in upstream's words.
+- **Not taken**: Content-Length taken from the request alone (#32, #36), in
+  the HTTP/2 bundle too: a caller's raw Content-Length stays this fork's
+  contract (A11, `TestTransportContentLengthHeaders`). An empty or repeated
+  User-Agent cut over HTTP/1.1 (#28, #32): the fork's raw User-Agent contract
+  (A11) stands, and upstream's test holds it. Upstream's
+  `TestServer_MaxQueuedControlFrames` of four million PINGs: the fork's over
+  net.Pipe stays. Upstream's brotli test of a remote page: the fork's local
+  server stays, the body now decoded by the transport.
+
+The fork's `http2` tests expect zstd in the default Accept-Encoding. Root alone
+(`GOWORK=off go test .`) and the other packages pass.
 
 ## Patches
 
