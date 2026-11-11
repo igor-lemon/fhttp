@@ -1213,9 +1213,14 @@ func TestServer_MaxQueuedControlFrames(t *testing.T) {
 					}
 				}
 			}
+			// An ACK the server wrote into its buffer is no longer queued.
+			// Pings it read while a write's report was still on its way
+			// come off the count when the report comes: as many ACKs as the
+			// buffer holds, and the one that waits to be flushed (x/net's
+			// test sends a few extra pings for the same reason).
 			n := maxQueuedControlFrames - 1
 			if over {
-				n = maxQueuedControlFrames + 4
+				n = maxQueuedControlFrames + bufWriterPoolBufferSize/(frameHeaderLen+8) + 4
 			}
 			payload := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 			for i := 0; i < n; i++ {
